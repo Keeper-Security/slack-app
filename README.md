@@ -1,6 +1,6 @@
 # Keeper Slack App
 
-Slack integration for Keeper Security that enables secure credential access requests, approval workflows, and one-time share links directly within Slack.
+Slack integration for Keeper Security that enables secure credential access requests, approval workflows, and one-time share links directly within Slack. Zero knowledge end-to-end encryption is preserved through the use of a self-hosted application container.
 
 ## Overview
 
@@ -12,6 +12,10 @@ This app connects Slack with Keeper Commander Service Mode, allowing teams to:
 - Search records and folders by name or UID
 
 The app uses Socket Mode, so no public endpoint is required.
+
+## Security
+
+The customer is responsible for hosting the Slack App and Commander Service Mode. Step by step setup instructions are available in the [KeeperPAM Slack App](https://docs.keeper.io/en/keeperpam/secrets-manager/integrations/slack-app) integration page.
 
 ## Prerequisites
 
@@ -250,7 +254,7 @@ Example:
 
 ---
 
-## PEDM (Privileged Elevation and Delegation Management)
+## PEDM (Keeper Endpoint Privilege Manager)
 
 To enable PEDM polling, set in your config:
 
@@ -296,5 +300,5 @@ keeper shell --service-mode --port 3001
 
 ## License
 
-Copyright 2022 Keeper Security Inc.
-Contact: ops@keepersecurity.com
+Copyright 2025 Keeper Security Inc.
+Contact: commander@keepersecurity.com
