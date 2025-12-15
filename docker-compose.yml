@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  keeper-slack-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: keeper-slack-app
+    restart: unless-stopped
+    
+    # Load environment variables from .env file
+    env_file:
+      - .env
+    
+    # Mount logs directory for persistence
+    volumes:
+      - ./logs:/app/logs
+    
+    # For connecting to Keeper Commander on host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+

@@ -1,0 +1,25 @@
+# ============================================================
+# SLACK CONFIGURATION
+# ============================================================
+slack:
+  app_token: "xapp-your-app-token"
+  bot_token: "xoxb-your-bot-token"
+  signing_secret: "your-signing-secret"
+  approvals_channel_id: "C0XXXXXXX"
+
+# ============================================================
+# KEEPER COMMANDER SERVICE MODE
+# ============================================================
+
+keeper:
+  service_url: "http://localhost:3001/api/v2/"
+  api_key: "your-keeper-api-key"
+
+# ============================================================
+# PEDM (Privileged Elevation & Delegation Management)
+# ============================================================
+
+pedm:
+  enabled: false
+  polling_interval: 120 # in seconds (Customize as needed how frequently you want to check for PEDM requests)
+
