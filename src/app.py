@@ -37,6 +37,10 @@ from .handlers import (
     handle_approve_pedm_request,
     handle_deny_pedm_request,
 )
+from .handlers.device_approvals import (
+    handle_approve_device,
+    handle_deny_device,
+)
 from .app_home import AppHomeHandler
 
 
@@ -90,6 +94,17 @@ class KeeperSlackApp:
         pedm_status = "enabled" if self.config.pedm.enabled else "disabled"
         logger.ok(f"PEDM poller initialized ({pedm_status}, interval: {self.config.pedm.polling_interval}s)")
         
+        # Initialize Device Approval poller
+        from .background.device_poller import DeviceApprovalPoller
+        self.device_poller = DeviceApprovalPoller(
+            slack_client=self.slack_app.client,
+            keeper_client=self.keeper_client,
+            config=self.config,
+            interval=self.config.device_approval.polling_interval
+        )
+        device_status = "enabled" if self.config.device_approval.enabled else "disabled"
+        logger.ok(f"Device Approval poller initialized ({device_status}, interval: {self.config.device_approval.polling_interval}s)")
+        
         # Initialize App Home handler
         self.app_home_handler = AppHomeHandler(self.config, self.keeper_client)
         self._register_app_home_events()
@@ -138,6 +153,17 @@ class KeeperSlackApp:
         def action_deny_pedm(ack, body, client):
             ack()
             handle_deny_pedm_request(body, client, self.config, self.keeper_client)
+        
+        # Device approval buttons
+        @self.slack_app.action("approve_device")
+        def action_approve_device(ack, body, client):
+            ack()
+            handle_approve_device(body, client, self.config, self.keeper_client)
+        
+        @self.slack_app.action("deny_device")
+        def action_deny_device(ack, body, client):
+            ack()
+            handle_deny_device(body, client, self.config, self.keeper_client)
         
         # Search buttons
         @self.slack_app.action("search_records")
@@ -392,6 +418,15 @@ class KeeperSlackApp:
                 logger.warning(f"Could not start PEDM poller: {e}")
         else:
             logger.info("PEDM polling is disabled (set pedm.enabled=true in config to enable)")
+        
+        # Start Device Approval poller in background (if enabled in config)
+        if self.config.device_approval.enabled:
+            try:
+                self.device_poller.start()
+            except Exception as e:
+                logger.warning(f"Could not start Device Approval poller: {e}")
+        else:
+            logger.info("Device Approval polling is disabled (set device_approval.enabled=true in config to enable)")
         
         try:
             self.socket_handler.start()

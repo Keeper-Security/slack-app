@@ -21,5 +21,14 @@ keeper:
 
 pedm:
   enabled: false
-  polling_interval: 120 # in seconds (Customize as needed how frequently you want to check for PEDM requests)
+  polling_interval: 120 # in seconds
+
+# ============================================================
+# DEVICE APPROVAL
+# ============================================================
+# Poll for pending device approval requests
+
+device_approval:
+  enabled: false
+  polling_interval: 120 # in seconds
 
