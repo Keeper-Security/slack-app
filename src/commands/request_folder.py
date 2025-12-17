@@ -19,46 +19,41 @@ from ..views import post_approval_request
 from ..logger import logger
 
 
-def handle_request_folder(body: Dict[str, Any], client, config, keeper_client):
+def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_client):
     """
     Handle /keeper-request-folder [folder] [reason] command.
     """
     user_id = body["user_id"]
     user_name = body["user_name"]
-    channel_id = body["channel_id"]
     text = body.get("text", "").strip()
     
     # Validate input
     if not text:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
+        respond(
             text="*Usage:* `/keeper-request-folder [folder-uid-or-description] [justification]`\n\n"
                  "*Examples:*\n"
-                 "• `/keeper-request-folder kF8zQ2Nm5Wx9PtR3sY7a Need staging access`\n"
-                 "• `/keeper-request-folder \"Staging Team Folder\" Need staging access`\n\n"
-                 "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs"
+                 "* `/keeper-request-folder kF8zQ2Nm5Wx9PtR3sY7a Need staging access`\n"
+                 "* `/keeper-request-folder \"Staging Team Folder\" Need staging access`\n\n"
+                 "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs",
+            response_type="ephemeral"
         )
         return
-    
 
     identifier, justification = parse_command_text(text)
     
     if not identifier:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Please provide a folder UID or description."
+        respond(
+            text="Please provide a folder UID or description.",
+            response_type="ephemeral"
         )
         return
     
     # Check if justification is provided
     if not justification:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
+        respond(
             text=f"Justification is required.\n\n"
-                 f"*Usage:* `/keeper-request-folder {identifier} <your reason for access>`"
+                 f"*Usage:* `/keeper-request-folder {identifier} <your reason for access>`",
+            response_type="ephemeral"
         )
         return
     
@@ -73,23 +68,21 @@ def handle_request_folder(body: Dict[str, Any], client, config, keeper_client):
         
         if not folder_details:
             # UID not found - send error to user
-            from ..utils import send_error_dm
-            send_error_dm(
-                client, user_id,
-                "Folder Not Found",
-                f"No folder found with UID: `{identifier}`\n\nPlease verify the UID and try again."
+            respond(
+                text=f"*Folder Not Found*\n\n"
+                     f"No folder found with UID: `{identifier}`\n\nPlease verify the UID and try again.",
+                response_type="ephemeral"
             )
             return
         
         # Validate it's actually a folder, not a record
         if folder_details.folder_type == 'record':
             logger.warning(f"UID {identifier} is a record, not a folder")
-            from ..utils import send_error_dm
-            send_error_dm(
-                client, user_id,
-                "Invalid UID Type",
-                f"The UID `{identifier}` is a **record**, not a folder.\n\n"
-                f"Please use `/keeper-request-record {identifier} {justification}` instead."
+            respond(
+                text=f"*Invalid UID Type*\n\n"
+                     f"The UID `{identifier}` is a **record**, not a folder.\n\n"
+                     f"Please use `/keeper-request-record {identifier} {justification}` instead.",
+                response_type="ephemeral"
             )
             return
     
@@ -112,24 +105,23 @@ def handle_request_folder(body: Dict[str, Any], client, config, keeper_client):
             folder_details=folder_details
         )
         
-        # Send confirmation to user via DM
-        from ..utils import send_success_dm
-        send_success_dm(
-            client, user_id,
-            "Folder access request submitted!",
+
+        respond(
+            text=f"*Folder access request submitted!*\n\n"
                  f"Request ID: `{approval_id}`\n"
                  f"Folder: `{identifier}`\n"
                  f"Justification: {justification}\n\n"
-                 f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval."
+                 f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+                 f"Once approved, the details will be sent to you via DM.",
+            response_type="ephemeral"
         )
             
     except Exception as e:
         logger.error(f"Error posting approval request: {e}")
         
-        # Send error message via DM
-        from ..utils import send_error_dm
-        send_error_dm(
-            client, user_id,
-            "Failed to submit access request",
-            f"Please try again or contact support.\n\nError: {str(e)}"
+
+        respond(
+            text=f"*Failed to submit access request*\n\n"
+                 f"Please try again or contact support.\n\nError: {str(e)}",
+            response_type="ephemeral"
         )

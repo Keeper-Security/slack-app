@@ -739,7 +739,15 @@ def update_approval_message(
     Update approval message with status.
     """
     # Remove action buttons
-    updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+    updated_blocks = []
+    for block in original_blocks:
+        if block.get("type") == "actions":
+            continue
+        if block.get("type") == "section" and block.get("accessory"):
+            continue
+        if block.get("type") == "input":
+            continue
+        updated_blocks.append(block)
     
     # Add status section
     updated_blocks.append({

@@ -420,7 +420,7 @@ class KeeperClient:
                 if "time-limited access" in error_msg.lower() and "re-share" in error_msg.lower():
                     return {
                         'success': False,
-                        'error': "⚠️ This user already has time-limited access to this record. "
+                        'error': "This user already has time-limited access to this record. "
                                  "Share permissions (Can Share, Edit & Share) require permanent access. "
                                  "Please revoke their existing access first, then grant the new permission."
                     }
@@ -471,8 +471,8 @@ class KeeperClient:
             permission_flags = []
             
             if permission == PermissionLevel.NO_PERMISSIONS:
-                # No user permissions: just view access (default read access)
-                pass
+                # No user permissions: explicitly disable both manage permissions
+                permission_flags.extend(["-o", "off", "-p", "off"])
             elif permission == PermissionLevel.MANAGE_USERS:
                 # Can manage users
                 permission_flags.extend(["-o", "on"])
@@ -553,7 +553,7 @@ class KeeperClient:
                 if is_time_limited_conflict or is_user_share_failed:
                     return {
                         'success': False,
-                        'error': "⚠️ This user already has time-limited access to this folder. "
+                        'error': "This user already has time-limited access to this folder. "
                                  "Manage permissions (Can Manage Users, Can Manage Users & Records) require permanent access. "
                                  "Please revoke their existing access first, then grant the new permission."
                     }
@@ -870,8 +870,8 @@ class KeeperClient:
             command_parts.append(f"--title '{title_escaped}'")
 
             if notes:
-                notes_escaped = notes.replace("'", "\\'").replace('\n', '\\n')
-                command_parts.append(f"--notes '{notes_escaped}'")
+                notes_escaped = notes.replace('\n', '\\n').replace('"', '\\"')
+                command_parts.append(f'--notes "{notes_escaped}"')
             
             # Self-destruct (space-separated, no quotes on duration)
             if self_destruct_duration:
