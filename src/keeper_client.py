@@ -420,9 +420,9 @@ class KeeperClient:
                 if "time-limited access" in error_msg.lower() and "re-share" in error_msg.lower():
                     return {
                         'success': False,
-                        'error': "This user already has time-limited access to this record. "
-                                 "Share permissions (Can Share, Edit & Share) require permanent access. "
-                                 "Please revoke their existing access first, then grant the new permission."
+                        'error': "Unable to grant record access. This user already has temporary access to this record "
+                                 "which conflicts with the selected permission level.\n\n"
+                                 "First remove the user's existing access, then grant the new permission."
                     }
                 
                 return {
@@ -475,10 +475,10 @@ class KeeperClient:
                 permission_flags.extend(["-o", "off", "-p", "off"])
             elif permission == PermissionLevel.MANAGE_USERS:
                 # Can manage users
-                permission_flags.extend(["-o", "on"])
+                permission_flags.extend(["-o", "on", "-p", "off"])
             elif permission == PermissionLevel.MANAGE_RECORDS:
                 # Can manage records
-                permission_flags.extend(["-p", "on"])
+                permission_flags.extend(["-o", "off", "-p", "on"])
             elif permission == PermissionLevel.MANAGE_ALL:
                 # Can manage both users and records
                 permission_flags.extend(["-o", "on", "-p", "on"])
@@ -533,6 +533,22 @@ class KeeperClient:
                     'error': "Command timed out or failed"
                 }
             
+
+            if result_data.get('http_status') == 400:
+                if permission in [PermissionLevel.MANAGE_USERS, PermissionLevel.MANAGE_RECORDS, PermissionLevel.MANAGE_ALL]:
+                    return {
+                        'success': False,
+                        'error': "Unable to grant folder access. This user already has temporary access to this folder "
+                                 "which conflicts with the selected permission level.\n\n"
+                                 "First remove the user's existing access, then grant the new permission."
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': "Unable to grant folder access. This user may have conflicting access to this folder.\n\n"
+                                 "First remove the user's existing access, then grant the new permission."
+                    }
+            
             if result_data.get('status') == 'success':
                 return {
                     'success': True,
@@ -553,9 +569,9 @@ class KeeperClient:
                 if is_time_limited_conflict or is_user_share_failed:
                     return {
                         'success': False,
-                        'error': "This user already has time-limited access to this folder. "
-                                 "Manage permissions (Can Manage Users, Can Manage Users & Records) require permanent access. "
-                                 "Please revoke their existing access first, then grant the new permission."
+                        'error': "Unable to grant folder access. This user already has temporary access to this folder "
+                                 "which conflicts with the selected permission level.\n\n"
+                                 "To fix: First remove the user's existing access, then grant the new permission."
                     }
                 
                 return {
@@ -603,6 +619,18 @@ class KeeperClient:
                         logger.warning(f"Unknown status: {status}")
                 else:
                     logger.warning(f"Poll returned status {response.status_code}")
+                    try:
+                        response_body = response.text
+                        logger.debug(f"Poll response body: {response_body}")
+                    except:
+                        pass
+                    if response.status_code == 400:
+                        logger.error(f"Poll returned 400 - returning error immediately")
+                        return {
+                            'status': 'error',
+                            'message': 'Command execution failed',
+                            'http_status': 400
+                        }
                 
                 # Wait before next poll
                 time.sleep(poll_interval)
