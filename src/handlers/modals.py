@@ -86,7 +86,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         logger.warning("No item selected - user submitted without selecting")
         ack(response_action="update", view={
             "type": "modal",
-            "title": {"type": "plain_text", "text": "❌ Selection Required"},
+            "title": {"type": "plain_text", "text": "Selection Required"},
             "close": {"type": "plain_text", "text": "Close"},
             "blocks": [
                 {
@@ -224,7 +224,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 
                 # Add self-destruct notice if applicable
                 if is_self_destruct:
-                    access_message += f"\n\n⚠️ *Self-Destruct Record*\n" \
+                    access_message += f"\n\n*Self-Destruct Record*\n" \
                                     f"This record will automatically delete from the vault after {duration_text}."
                 
                 from ..utils import send_dm
@@ -256,7 +256,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         
                         # Add self-destruct note if applicable
                         if is_self_destruct:
-                            status_msg += f"\n\n⚠️ *Self-Destruct Record*\nRecord will auto-delete after {duration_text}"
+                            status_msg += f"\n\n*Self-Destruct Record*\nRecord will auto-delete after {duration_text}"
                             approval_text = "Self-Destruct Record Access Approved"
                         else:
                             approval_text = "Access Request Approved"
@@ -323,7 +323,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     trigger_id=body.get("trigger_id"),
                     view={
                         "type": "modal",
-                        "title": {"type": "plain_text", "text": "❌ Error"},
+                        "title": {"type": "plain_text", "text": "Error"},
                         "close": {"type": "plain_text", "text": "Close"},
                         "blocks": [
                             {
