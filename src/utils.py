@@ -156,7 +156,6 @@ def sanitize_command_input(text: str) -> str:
 
 def sanitize_slack_mentions(text: str) -> str:
     """
-    Remove or neutralize Slack special mentions that could be abused.
     Prevents @here, @channel, @everyone spam attacks.
     """
     if not text:
@@ -166,19 +165,19 @@ def sanitize_slack_mentions(text: str) -> str:
     
     # Remove @here, @channel, @everyone
     patterns = [
-        r'<!here\|?[^>]*>', 
-        r'<!channel\|?[^>]*>',
-        r'<!everyone\|?[^>]*>', 
-        r'@here\b',   
-        r'@channel\b', 
-        r'@everyone\b',
+        r'<!here\|?[^>]*>\s*',    # Slack formatted mention
+        r'<!channel\|?[^>]*>\s*',
+        r'<!everyone\|?[^>]*>\s*', 
+        r'@here\s*',              # Plain text mention
+        r'@channel\s*', 
+        r'@everyone\s*',
     ]
     
     sanitized = text
     for pattern in patterns:
-        sanitized = re.sub(pattern, '[mention removed]', sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(pattern, '', sanitized, flags=re.IGNORECASE)
     
-    return sanitized
+    return sanitized.strip()
 
 
 def validate_input_length(text: str, max_length: int, field_name: str = "Input") -> Tuple[bool, str]:
