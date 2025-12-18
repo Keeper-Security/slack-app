@@ -14,7 +14,10 @@
 
 from typing import Dict, Any
 from ..models import RequestType
-from ..utils import generate_approval_id, is_valid_uid, parse_command_text
+from ..utils import (
+    generate_approval_id, is_valid_uid, parse_command_text,
+    sanitize_user_input, MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH
+)
 from ..views import post_approval_request
 from ..logger import logger
 
@@ -30,11 +33,12 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
     # Validate input
     if not text:
         respond(
-            text="*Usage:* `/keeper-one-time-share [record-uid-or-description] [justification]`\n\n"
+            text="*Usage:* `/keeper-one-time-share \"Record UID or Description\" Justification message or ticket number`\n\n"
                  "*Examples:*\n"
-                 "* `/keeper-one-time-share kR3cF9Xm2Lp8NqT1uV6w Need to share with contractor John`\n"
-                 "* `/keeper-one-time-share \"AWS Production Password\" Need to share with vendor`\n\n"
+                 "• `/keeper-one-time-share kR3cF9Xm2Lp8NqT1uV6w Need to share with contractor John`\n"
+                 "• `/keeper-one-time-share \"AWS Production Password\" JIRA-1234 Need to share with vendor`\n\n"
                  "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs",
+                 
             response_type="ephemeral"
         )
         return
@@ -53,9 +57,20 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
     if not justification:
         respond(
             text=f"Justification is required.\n\n"
-                 f"*Usage:* `/keeper-one-time-share {identifier} <reason for creating share link>`",
+                 f"*Usage:* `/keeper-one-time-share \"{identifier}\" Justification message or ticket number`",
             response_type="ephemeral"
         )
+        return
+    
+    # Security: Sanitize and validate inputs
+    identifier, id_valid, id_error = sanitize_user_input(identifier, MAX_IDENTIFIER_LENGTH)
+    if not id_valid:
+        respond(text=f"*Invalid Input*\n\n{id_error}", response_type="ephemeral")
+        return
+    
+    justification, just_valid, just_error = sanitize_user_input(justification, MAX_JUSTIFICATION_LENGTH)
+    if not just_valid:
+        respond(text=f"*Invalid Input*\n\n{just_error}", response_type="ephemeral")
         return
     
     # Determine if UID or description
@@ -102,7 +117,7 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
             is_uid=is_uid,
             request_type=RequestType.ONE_TIME_SHARE,
             justification=justification,
-            duration="24h",  # Default suggestion (approver can change)
+            duration="1h",  # Default minimum (approver can change)
             record_details=record_details
         )
         

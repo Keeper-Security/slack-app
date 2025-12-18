@@ -55,7 +55,7 @@ class PEDMConfig:
     enabled: bool = False
     """Whether PEDM polling is enabled"""
     
-    polling_interval: int = 120
+    polling_interval_in_sec: int = 120
     """Polling interval in seconds (default: 120 = 2 minutes)"""
 
 
@@ -119,7 +119,7 @@ class Config:
             'KEEPER_SERVICE_URL': ('keeper', 'service_url'),
             'KEEPER_API_KEY': ('keeper', 'api_key'),
             'PEDM_ENABLED': ('pedm', 'enabled'),
-            'PEDM_POLLING_INTERVAL': ('pedm', 'polling_interval'),
+            'PEDM_POLLING_INTERVAL_IN_SEC': ('pedm', 'polling_interval_in_sec'),
         }
         
         for env_var, (section, key) in env_mappings.items():
@@ -130,7 +130,7 @@ class Config:
                 # Convert boolean and integer values
                 if key == 'enabled':
                     value = value.lower() in ('true', '1', 'yes')
-                elif key == 'polling_interval':
+                elif key == 'polling_interval_in_sec':
                     value = int(value)
                 self._data[section][key] = value
     
@@ -213,7 +213,7 @@ class Config:
         pedm_data = self._data.get('pedm', {})
         return PEDMConfig(
             enabled=pedm_data.get('enabled', False),
-            polling_interval=pedm_data.get('polling_interval', 120)
+            polling_interval_in_sec=pedm_data.get('polling_interval_in_sec', 120)
         )
     
     def get(self, key: str, default: Any = None) -> Any:

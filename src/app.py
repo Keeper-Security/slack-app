@@ -85,10 +85,10 @@ class KeeperSlackApp:
             slack_client=self.slack_app.client,
             keeper_client=self.keeper_client,
             config=self.config,
-            interval=self.config.pedm.polling_interval
+            interval=self.config.pedm.polling_interval_in_sec
         )
         pedm_status = "enabled" if self.config.pedm.enabled else "disabled"
-        logger.ok(f"PEDM poller initialized ({pedm_status}, interval: {self.config.pedm.polling_interval}s)")
+        logger.ok(f"PEDM poller initialized ({pedm_status}, interval: {self.config.pedm.polling_interval_in_sec}s)")
         
         # Initialize App Home handler
         self.app_home_handler = AppHomeHandler(self.config, self.keeper_client)
@@ -247,7 +247,7 @@ class KeeperSlackApp:
                                         "type": "static_select",
                                         "action_id": "select_duration",
                                         "options": get_duration_options(),
-                                        "initial_option": {"text": {"type": "plain_text", "text": "24 hours"}, "value": "24h"}
+                                        "initial_option": {"text": {"type": "plain_text", "text": "1 hour"}, "value": "1h"}
                                     }
                                 })
                             else:

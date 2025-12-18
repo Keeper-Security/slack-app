@@ -142,7 +142,7 @@ class AccessRequest:
     created_at: datetime
     """When the request was created"""
     
-    duration: str = "24h"
+    duration: str = "1h"
     """Duration of access (e.g., "1h", "24h", "7d", "permanent")"""
     
     status: str = "pending"
@@ -168,7 +168,7 @@ class ApprovalAction:
     is_uid: bool
     request_type: str
     justification: str
-    duration: str = "24h"
+    duration: str = "1h"
 
 
 @dataclass

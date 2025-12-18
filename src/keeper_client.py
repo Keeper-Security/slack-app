@@ -618,12 +618,15 @@ class KeeperClient:
                     else:
                         logger.warning(f"Unknown status: {status}")
                 else:
-                    logger.warning(f"Poll returned status {response.status_code}")
-                    try:
-                        response_body = response.text
-                        logger.debug(f"Poll response body: {response_body}")
-                    except:
-                        pass
+                    if response.status_code == 202:
+                        logger.debug("Async command still processing, waiting...")
+                    else:
+                        logger.warning(f"Poll returned status {response.status_code}")
+                        try:
+                            response_body = response.text
+                            logger.debug(f"Poll response body: {response_body}")
+                        except:
+                            pass
                     if response.status_code == 400:
                         logger.error(f"Poll returned 400 - returning error immediately")
                         return {

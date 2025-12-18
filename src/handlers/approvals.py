@@ -76,7 +76,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         
         # If not found in blocks, fall back to action_data default
         if not duration_value:
-            duration_value = action_data.get("duration", "24h")
+            duration_value = action_data.get("duration", "1h")
         
         duration_seconds = parse_duration_to_seconds(duration_value)
         duration_text = format_duration(duration_value)
