@@ -53,10 +53,18 @@ def parse_command_text(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
     
-    # Check for quoted identifier
     if text.startswith('"'):
         # Find closing quote
         end_quote = text.find('"', 1)
+        if end_quote != -1:
+            identifier = text[1:end_quote]
+            justification = text[end_quote + 1:].strip()
+            return identifier, justification
+    
+    # Check for quoted identifier (single quotes)
+    if text.startswith("'"):
+        # Find closing quote
+        end_quote = text.find("'", 1)
         if end_quote != -1:
             identifier = text[1:end_quote]
             justification = text[end_quote + 1:].strip()
@@ -129,21 +137,19 @@ MAX_IDENTIFIER_LENGTH = 200
 def sanitize_command_input(text: str) -> str:
     """
     Sanitize user input to prevent command injection.
-    Escapes shell special characters that could be used for injection attacks.
+    Removes shell special characters that could be used for injection attacks.
+    Note: Quotes are kept as-is for display; shell escaping is handled at command execution.
     """
     if not text:
         return text
     
-    # Characters that could be used injection
+    # Characters that could be used for injection
     dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '[', ']', 
                        '!', '\\', '\n', '\r', '\x00']
     
     sanitized = text
     for char in dangerous_chars:
         sanitized = sanitized.replace(char, '')
-    
-
-    sanitized = sanitized.replace('"', '\\"').replace("'", "\\'")
     
     return sanitized.strip()
 
