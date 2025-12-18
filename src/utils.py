@@ -53,10 +53,18 @@ def parse_command_text(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
     
-    # Check for quoted identifier
     if text.startswith('"'):
         # Find closing quote
         end_quote = text.find('"', 1)
+        if end_quote != -1:
+            identifier = text[1:end_quote]
+            justification = text[end_quote + 1:].strip()
+            return identifier, justification
+    
+    # Check for quoted identifier (single quotes)
+    if text.startswith("'"):
+        # Find closing quote
+        end_quote = text.find("'", 1)
         if end_quote != -1:
             identifier = text[1:end_quote]
             justification = text[end_quote + 1:].strip()
@@ -99,6 +107,7 @@ def truncate_text(text: str, max_length: int = 100) -> str:
 def sanitize_slack_text(text: str) -> str:
     """
     Sanitize text for safe display in Slack.
+    Escapes special characters and sanitizes hyperlinks.
     """
     # Escape special Slack characters
     replacements = {
@@ -111,6 +120,96 @@ def sanitize_slack_text(text: str) -> str:
         text = text.replace(char, escape)
     
     return text
+
+
+def sanitize_hyperlinks(text: str) -> str:
+    """
+    Sanitize hyperlinks in text.
+    URLs are kept as-is; previews are blocked via unfurl_links=False in chat_postMessage.
+    """
+    return text
+
+# Maximum allowed length for user input fields
+MAX_JUSTIFICATION_LENGTH = 500
+MAX_IDENTIFIER_LENGTH = 200
+
+
+def sanitize_command_input(text: str) -> str:
+    """
+    Sanitize user input to prevent command injection.
+    Removes shell special characters that could be used for injection attacks.
+    Note: Quotes are kept as-is for display; shell escaping is handled at command execution.
+    """
+    if not text:
+        return text
+    
+    # Characters that could be used for injection
+    dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '[', ']', 
+                       '!', '\\', '\n', '\r', '\x00']
+    
+    sanitized = text
+    for char in dangerous_chars:
+        sanitized = sanitized.replace(char, '')
+    
+    return sanitized.strip()
+
+
+def sanitize_slack_mentions(text: str) -> str:
+    """
+    Prevents @here, @channel, @everyone spam attacks.
+    """
+    if not text:
+        return text
+    
+    import re
+    
+    # Remove @here, @channel, @everyone
+    patterns = [
+        r'<!here\|?[^>]*>\s*',    # Slack formatted mention
+        r'<!channel\|?[^>]*>\s*',
+        r'<!everyone\|?[^>]*>\s*', 
+        r'@here\s*',              # Plain text mention
+        r'@channel\s*', 
+        r'@everyone\s*',
+    ]
+    
+    sanitized = text
+    for pattern in patterns:
+        sanitized = re.sub(pattern, '', sanitized, flags=re.IGNORECASE)
+    
+    return sanitized.strip()
+
+
+def validate_input_length(text: str, max_length: int, field_name: str = "Input") -> Tuple[bool, str]:
+    """
+    Validate that input text doesn't exceed maximum length.
+    """
+    if not text:
+        return True, ""
+    
+    if len(text) > max_length:
+        return False, f"{field_name} is too long. Maximum {max_length} characters allowed (you have {len(text)})."
+    
+    return True, ""
+
+
+def sanitize_user_input(text: str, max_length: int = MAX_JUSTIFICATION_LENGTH) -> Tuple[str, bool, str]:
+    """
+    Apply all input sanitization and validation.
+    """
+    if not text:
+        return text, True, ""
+    
+    # Check length first
+    is_valid, error_msg = validate_input_length(text, max_length)
+    if not is_valid:
+        return text, False, error_msg
+    
+    # Apply sanitizations
+    sanitized = sanitize_slack_mentions(text)
+    sanitized = sanitize_command_input(sanitized)
+    
+    return sanitized, True, ""
 
 
 def format_permission_name(permission: str) -> str:
@@ -148,7 +247,7 @@ def parse_duration_to_seconds(duration_str: str) -> Optional[int]:
         '7d': 604800,        
         '30d': 2592000       
     }
-    return mapping.get(duration_str, 86400)  # Default: 24 hours
+    return mapping.get(duration_str, 3600)  # Default: 1 hour
 
 
 def format_duration(duration_str: str) -> str:
@@ -164,7 +263,7 @@ def format_duration(duration_str: str) -> str:
         '30d': '30 days',
         'permanent': 'Permanent'
     }
-    return mapping.get(duration_str, '24 hours')
+    return mapping.get(duration_str, '1 hour')
 
 
 def get_duration_options() -> list:

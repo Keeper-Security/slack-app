@@ -119,7 +119,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         # Self-destruct records: use duration from creation, always view-only
         logger.info("Self-destruct record detected - sharing with view-only access")
         permission = PermissionLevel.VIEW_ONLY
-        self_destruct_duration_str = approval_data.get('self_destruct_duration', '24h')
+        self_destruct_duration_str = approval_data.get('self_destruct_duration', '1h')
         duration_seconds = parse_duration_to_seconds(self_destruct_duration_str)
         duration_value = self_destruct_duration_str
         duration_text = format_duration(self_destruct_duration_str)
@@ -153,7 +153,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         else:
             # Normal duration handling for View Only and Can Edit
             duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
-            duration_value = duration_block.get("selected_option", {}).get("value", "24h")
+            duration_value = duration_block.get("selected_option", {}).get("value", "1h")
             duration_seconds = parse_duration_to_seconds(duration_value)
             duration_text = format_duration(duration_value)
     

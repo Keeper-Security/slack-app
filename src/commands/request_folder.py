@@ -14,7 +14,10 @@
 
 from typing import Dict, Any
 from ..models import RequestType
-from ..utils import generate_approval_id, is_valid_uid, parse_command_text
+from ..utils import (
+    generate_approval_id, is_valid_uid, parse_command_text,
+    sanitize_user_input, MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH
+)
 from ..views import post_approval_request
 from ..logger import logger
 
@@ -30,10 +33,10 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
     # Validate input
     if not text:
         respond(
-            text="*Usage:* `/keeper-request-folder [folder-uid-or-description] [justification]`\n\n"
+            text="*Usage:* `/keeper-request-folder \"Folder UID or Description\" Justification message or ticket number`\n\n"
                  "*Examples:*\n"
-                 "* `/keeper-request-folder kF8zQ2Nm5Wx9PtR3sY7a Need staging access`\n"
-                 "* `/keeper-request-folder \"Staging Team Folder\" Need staging access`\n\n"
+                 "• `/keeper-request-folder kF8zQ2Nm5Wx9PtR3sY7a Need staging access`\n"
+                 "• `/keeper-request-folder \"Staging Team Folder\" JIRA-1234 Need access for deployment`\n\n"
                  "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs",
             response_type="ephemeral"
         )
@@ -52,9 +55,20 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
     if not justification:
         respond(
             text=f"Justification is required.\n\n"
-                 f"*Usage:* `/keeper-request-folder {identifier} <your reason for access>`",
+                 f"*Usage:* `/keeper-request-folder \"{identifier}\" Justification message or ticket number`",
             response_type="ephemeral"
         )
+        return
+    
+    # Security: Sanitize and validate inputs
+    identifier, id_valid, id_error = sanitize_user_input(identifier, MAX_IDENTIFIER_LENGTH)
+    if not id_valid:
+        respond(text=f"*Invalid Input*\n\n{id_error}", response_type="ephemeral")
+        return
+    
+    justification, just_valid, just_error = sanitize_user_input(justification, MAX_JUSTIFICATION_LENGTH)
+    if not just_valid:
+        respond(text=f"*Invalid Input*\n\n{just_error}", response_type="ephemeral")
         return
     
     # Determine if UID or description
@@ -101,7 +115,7 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
             is_uid=is_uid,
             request_type=RequestType.FOLDER,
             justification=justification,
-            duration="24h",  # Default suggestion (approver can change)
+            duration="1h",  # Default minimum (approver can change)
             folder_details=folder_details
         )
         
