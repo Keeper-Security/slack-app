@@ -967,18 +967,6 @@ def post_device_approval_request(
 ):
     """
     Post Device Approval request to Slack channel.
-    
-    Args:
-        client: Slack client instance
-        approvals_channel: Channel ID to post to
-        device_data: Device data dict with keys:
-            - device_id: Unique device identifier
-            - device_name: Human-readable device name
-            - device_type: Type of device (Web Vault, iOS, etc.)
-            - client_version: Client software version
-            - email: User email requesting approval
-            - ip_address: IP address of the device
-            - date: Request timestamp
     """
     device_id = device_data.get('device_id', 'Unknown')
     device_name = device_data.get('device_name', 'Unknown Device')

@@ -36,7 +36,7 @@ def handle_approve_device(body: Dict[str, Any], client, config, keeper_client):
         
         if result.get('success'):
             # Update approval message
-            status_text = f"✅ *Status:* Approved by <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+            status_text = f"*Status:* Approved by <@{approver_id}>\n*Updated:* {_format_timestamp()}"
             
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
@@ -61,7 +61,7 @@ def handle_approve_device(body: Dict[str, Any], client, config, keeper_client):
         else:
             # Update with error
             error_msg = result.get('error', 'Unknown error')
-            status_text = f"❌ *Status:* Approval failed - {error_msg}"
+            status_text = f"*Status:* Approval failed - {error_msg}"
             
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
@@ -105,7 +105,7 @@ def handle_deny_device(body: Dict[str, Any], client, config, keeper_client):
         
         if result.get('success'):
             # Update approval message
-            status_text = f"🚫 *Status:* Denied by <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+            status_text = f"*Status:* Denied by <@{approver_id}>\n*Updated:* {_format_timestamp()}"
             
             # Remove action buttons
             original_blocks = body["message"]["blocks"]
@@ -131,7 +131,7 @@ def handle_deny_device(body: Dict[str, Any], client, config, keeper_client):
         else:
             # Update with error
             error_msg = result.get('error', 'Unknown error')
-            status_text = f"❌ *Status:* Denial failed - {error_msg}"
+            status_text = f"*Status:* Denial failed - {error_msg}"
             
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]

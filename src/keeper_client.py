@@ -1159,30 +1159,15 @@ class KeeperClient:
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
-    # =========================================================================
-    # DEVICE APPROVAL METHODS
-    # =========================================================================
-    
+
     def get_pending_device_approvals(self) -> List[Dict[str, Any]]:
         """
         Get pending device approval requests.
-        
-        Returns list of devices awaiting approval with format:
-        {
-            "device_id": "5ffe5db67e55554a451f",
-            "device_name": "Web Vault Chrome",
-            "device_type": "Web Vault",
-            "client_version": "w17.5.0",
-            "email": "user@example.com",
-            "ip_address": "10.5.12.58",
-            "date": "2025-12-16 10:07:38"
-        }
         """
         try:
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": "device-approve --format=json"},
+                json={"command": "device-approve --reload --format=json"},
                 timeout=10
             )
             
@@ -1233,12 +1218,6 @@ class KeeperClient:
     def approve_device(self, device_id: str) -> Dict[str, Any]:
         """
         Approve a device request.
-        
-        Args:
-            device_id: The device ID to approve
-            
-        Returns:
-            Dict with 'success' boolean and optional 'error' message
         """
         try:
             command = f"device-approve --approve {device_id}"
@@ -1273,12 +1252,6 @@ class KeeperClient:
     def deny_device(self, device_id: str) -> Dict[str, Any]:
         """
         Deny a device request.
-        
-        Args:
-            device_id: The device ID to deny
-            
-        Returns:
-            Dict with 'success' boolean and optional 'error' message
         """
         try:
             command = f"device-approve --deny {device_id}"
