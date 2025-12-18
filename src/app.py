@@ -114,19 +114,19 @@ class KeeperSlackApp:
         """Register all slash command handlers."""
         
         @self.slack_app.command("/keeper-request-record")
-        def cmd_request_record(ack, body, client):
+        def cmd_request_record(ack, body, client, respond):
             ack()
-            handle_request_record(body, client, self.config, self.keeper_client)
+            handle_request_record(body, client, respond, self.config, self.keeper_client)
         
         @self.slack_app.command("/keeper-request-folder")
-        def cmd_request_folder(ack, body, client):
+        def cmd_request_folder(ack, body, client, respond):
             ack()
-            handle_request_folder(body, client, self.config, self.keeper_client)
+            handle_request_folder(body, client, respond, self.config, self.keeper_client)
         
         @self.slack_app.command("/keeper-one-time-share")
-        def cmd_one_time_share(ack, body, client):
+        def cmd_one_time_share(ack, body, client, respond):
             ack()
-            handle_one_time_share(body, client, self.config, self.keeper_client)
+            handle_one_time_share(body, client, respond, self.config, self.keeper_client)
 
     
     def _register_interactions(self):
