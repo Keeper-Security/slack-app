@@ -10,7 +10,7 @@
 # Contact: ops@keepersecurity.com
 #
 
-"""Handlers for Device Approval interactions."""
+"""Handlers for Cloud SSO Device Approval interactions."""
 
 from typing import Dict, Any
 from ..logger import logger

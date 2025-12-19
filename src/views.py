@@ -974,7 +974,7 @@ def post_device_approval_request(
     device_data: dict
 ):
     """
-    Post Device Approval request to Slack channel.
+    Post Cloud SSO Device Approval request to Slack channel.
     """
     device_id = device_data.get('device_id', 'Unknown')
     device_name = device_data.get('device_name', 'Unknown Device')
@@ -988,7 +988,7 @@ def post_device_approval_request(
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "Device Approval Request"}
+            "text": {"type": "plain_text", "text": "Cloud SSO Device Approval Request"}
         },
         {
             "type": "section",
@@ -1033,7 +1033,7 @@ def post_device_approval_request(
         client.chat_postMessage(
             channel=approvals_channel,
             blocks=blocks,
-            text=f"Device Approval Request from {email} - {device_name}"
+            text=f"Cloud SSO Device Approval Request from {email} - {device_name}"
         )
         print(f"[OK] Posted device approval request {device_id} to Slack")
     except Exception as e:

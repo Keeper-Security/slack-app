@@ -10,7 +10,7 @@
 # Contact: ops@keepersecurity.com
 #
 
-"""Background polling for Device Approval requests."""
+"""Background polling for Cloud SSO Device Approval requests."""
 
 import threading
 import time
@@ -43,12 +43,12 @@ class DeviceApprovalPoller:
             logger.warning("Device approval poller already running")
             return
         
-        logger.info("Starting Device Approval poller (background)...")
+        logger.info("Starting Cloud SSO Device Approval poller (background)...")
         
         self.running = True
         self.thread = threading.Thread(target=self._poll_loop, daemon=True)
         self.thread.start()
-        logger.ok(f"Device Approval poller started (interval: {self.interval}s)")
+        logger.ok(f"Cloud SSO Device Approval poller started (interval: {self.interval}s)")
     
     def stop(self):
         """Stop the background polling thread."""
@@ -58,7 +58,7 @@ class DeviceApprovalPoller:
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        logger.info("Device Approval poller stopped")
+        logger.info("Cloud SSO Device Approval poller stopped")
     
     def _poll_loop(self):
         """Main polling loop."""

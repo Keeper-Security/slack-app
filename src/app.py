@@ -94,7 +94,7 @@ class KeeperSlackApp:
         pedm_status = "enabled" if self.config.pedm.enabled else "disabled"
         logger.ok(f"PEDM poller initialized ({pedm_status}, interval: {self.config.pedm.polling_interval}s)")
         
-        # Initialize Device Approval poller
+        # Initialize Cloud SSO Device Approval poller
         from .background.device_poller import DeviceApprovalPoller
         self.device_poller = DeviceApprovalPoller(
             slack_client=self.slack_app.client,
@@ -103,7 +103,7 @@ class KeeperSlackApp:
             interval=self.config.device_approval.polling_interval
         )
         device_status = "enabled" if self.config.device_approval.enabled else "disabled"
-        logger.ok(f"Device Approval poller initialized ({device_status}, interval: {self.config.device_approval.polling_interval}s)")
+        logger.ok(f"Cloud SSO Device Approval poller initialized ({device_status}, interval: {self.config.device_approval.polling_interval}s)")
         
         # Initialize App Home handler
         self.app_home_handler = AppHomeHandler(self.config, self.keeper_client)
