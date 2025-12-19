@@ -972,3 +972,75 @@ def post_pedm_approval_request(
         print(f"[OK] Posted PEDM request {request.approval_uid} to Slack")
     except Exception as e:
         print(f"[ERROR] Failed to post PEDM request to Slack: {e}")
+
+
+def post_device_approval_request(
+    client,
+    approvals_channel: str,
+    device_data: dict
+):
+    """
+    Post Cloud SSO Device Approval request to Slack channel.
+    """
+    device_id = device_data.get('device_id', 'Unknown')
+    device_name = device_data.get('device_name', 'Unknown Device')
+    device_type = device_data.get('device_type', 'Unknown')
+    client_version = device_data.get('client_version', 'Unknown')
+    email = device_data.get('email', 'Unknown')
+    ip_address = device_data.get('ip_address', 'Unknown')
+    request_date = device_data.get('date', 'Unknown')
+    
+    # Build approval card
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Cloud SSO Device Approval Request"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*User Email:*\n{email}"},
+                {"type": "mrkdwn", "text": f"*Device ID:*\n`{device_id}`"},
+                {"type": "mrkdwn", "text": f"*Device Name:*\n{device_name}"},
+                {"type": "mrkdwn", "text": f"*Device Type:*\n{device_type}"},
+                {"type": "mrkdwn", "text": f"*Client Version:*\n{client_version}"},
+                {"type": "mrkdwn", "text": f"*IP Address:*\n`{ip_address}`"}
+            ]
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"*Requested:* {request_date}"}
+            ]
+        },
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve Device"},
+                    "style": "primary",
+                    "action_id": "approve_device",
+                    "value": device_id
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Deny Device"},
+                    "style": "danger",
+                    "action_id": "deny_device",
+                    "value": device_id
+                }
+            ]
+        }
+    ]
+    
+    try:
+        client.chat_postMessage(
+            channel=approvals_channel,
+            blocks=blocks,
+            text=f"Cloud SSO Device Approval Request from {email} - {device_name}"
+        )
+        print(f"[OK] Posted device approval request {device_id} to Slack")
+    except Exception as e:
+        print(f"[ERROR] Failed to post device approval to Slack: {e}")

@@ -1190,3 +1190,126 @@ class KeeperClient:
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def get_pending_device_approvals(self) -> List[Dict[str, Any]]:
+        """
+        Get pending device approval requests.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": "device-approve --reload --format=json"},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                logger.error(f"Failed to submit device-approve command: {response.status_code}")
+                return []
+            
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for device-approve")
+                return []
+            
+            result_data = self._poll_for_result(request_id, max_wait=30)
+            
+            if not result_data:
+                logger.warning("Device approval command timed out")
+                return []
+            
+            status = result_data.get('status')
+            if status == 'error':
+                error_msg = result_data.get('message', 'Unknown error')
+                logger.error(f"Device approval command failed: {error_msg}")
+                return []
+            
+            if status == 'success':
+                data = result_data.get('data')
+                
+                # Handle None (no pending device approvals)
+                if data is None:
+                    logger.debug("No pending device approvals")
+                    return []
+                
+                if isinstance(data, list):
+                    logger.debug(f"Retrieved {len(data)} pending device approval(s)")
+                    return data
+                else:
+                    logger.error(f"Unexpected device approval data type: {type(data)}")
+                    return []
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Exception fetching device approvals: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def approve_device(self, device_id: str) -> Dict[str, Any]:
+        """
+        Approve a device request.
+        """
+        try:
+            command = f"device-approve --approve {device_id}"
+            logger.info(f"Approving device: {device_id}")
+            
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": command},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                return {'success': False, 'error': f"HTTP {response.status_code}"}
+            
+            request_id = response.json().get('request_id')
+            if not request_id:
+                return {'success': False, 'error': "No request_id"}
+            
+            result_data = self._poll_for_result(request_id, max_wait=10)
+            
+            if result_data and result_data.get('status') == 'success':
+                logger.ok(f"Device {device_id} approved successfully")
+                return {'success': True}
+            else:
+                error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                return {'success': False, 'error': error}
+                
+        except Exception as e:
+            logger.error(f"Exception approving device: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def deny_device(self, device_id: str) -> Dict[str, Any]:
+        """
+        Deny a device request.
+        """
+        try:
+            command = f"device-approve --deny {device_id}"
+            logger.info(f"Denying device: {device_id}")
+            
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": command},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                return {'success': False, 'error': f"HTTP {response.status_code}"}
+            
+            request_id = response.json().get('request_id')
+            if not request_id:
+                return {'success': False, 'error': "No request_id"}
+            
+            result_data = self._poll_for_result(request_id, max_wait=10)
+            
+            if result_data and result_data.get('status') == 'success':
+                logger.ok(f"Device {device_id} denied successfully")
+                return {'success': True}
+            else:
+                error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                return {'success': False, 'error': error}
+                
+        except Exception as e:
+            logger.error(f"Exception denying device: {e}")
+            return {'success': False, 'error': str(e)}
