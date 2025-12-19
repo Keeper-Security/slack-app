@@ -61,10 +61,10 @@ class PEDMConfig:
 
 @dataclass
 class DeviceApprovalConfig:
-    """Device Approval polling configuration."""
+    """Cloud SSO Device Approval polling configuration."""
     
     enabled: bool = False
-    """Whether Device Approval polling is enabled"""
+    """Whether Cloud SSO Device Approval polling is enabled"""
     
     polling_interval: int = 120
     """Polling interval in seconds (default: 120 = 2 minutes)"""
@@ -232,7 +232,7 @@ class Config:
     @property
     def device_approval(self) -> DeviceApprovalConfig:
         """
-        Get Device Approval polling configuration.
+        Get Cloud SSO Device Approval polling configuration.
         """
         device_data = self._data.get('device_approval', {})
         return DeviceApprovalConfig(

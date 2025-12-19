@@ -419,14 +419,14 @@ class KeeperSlackApp:
         else:
             logger.info("PEDM polling is disabled (set pedm.enabled=true in config to enable)")
         
-        # Start Device Approval poller in background (if enabled in config)
+        # Start Cloud SSO Device Approval poller in background (if enabled in config)
         if self.config.device_approval.enabled:
             try:
                 self.device_poller.start()
             except Exception as e:
-                logger.warning(f"Could not start Device Approval poller: {e}")
+                logger.warning(f"Could not start Cloud SSO Device Approval poller: {e}")
         else:
-            logger.info("Device Approval polling is disabled (set device_approval.enabled=true in config to enable)")
+            logger.info("Cloud SSO Device Approval polling is disabled (set device_approval.enabled=true in config to enable)")
         
         try:
             self.socket_handler.start()
