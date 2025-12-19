@@ -30,4 +30,4 @@ pedm:
 
 device_approval:
   enabled: false
-  polling_interval: 120 # Customize as needed how frequently you want to check for PEDM requests
+  polling_interval_in_sec: 120 # Customize as needed how frequently you want to check for device approval requests

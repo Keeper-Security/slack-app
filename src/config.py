@@ -66,7 +66,7 @@ class DeviceApprovalConfig:
     enabled: bool = False
     """Whether Cloud SSO Device Approval polling is enabled"""
     
-    polling_interval: int = 120
+    polling_interval_in_sec: int = 120
     """Polling interval in seconds (default: 120 = 2 minutes)"""
 
 
@@ -132,7 +132,7 @@ class Config:
             'PEDM_ENABLED': ('pedm', 'enabled'),
             'PEDM_POLLING_INTERVAL_IN_SEC': ('pedm', 'polling_interval_in_sec'),
             'DEVICE_APPROVAL_ENABLED': ('device_approval', 'enabled'),
-            'DEVICE_APPROVAL_POLLING_INTERVAL': ('device_approval', 'polling_interval'),        }
+            'DEVICE_APPROVAL_POLLING_INTERVAL_IN_SEC': ('device_approval', 'polling_interval_in_sec'),        }
         
         for env_var, (section, key) in env_mappings.items():
             value = os.environ.get(env_var)
@@ -236,7 +236,7 @@ class Config:
         device_data = self._data.get('device_approval', {})
         return DeviceApprovalConfig(
             enabled=device_data.get('enabled', False),
-            polling_interval=device_data.get('polling_interval', 120)
+            polling_interval_in_sec=device_data.get('polling_interval_in_sec', 120)
         )
     
     def get(self, key: str, default: Any = None) -> Any:

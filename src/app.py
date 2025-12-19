@@ -100,10 +100,10 @@ class KeeperSlackApp:
             slack_client=self.slack_app.client,
             keeper_client=self.keeper_client,
             config=self.config,
-            interval=self.config.device_approval.polling_interval
+            interval=self.config.device_approval.polling_interval_in_sec
         )
         device_status = "enabled" if self.config.device_approval.enabled else "disabled"
-        logger.ok(f"Cloud SSO Device Approval poller initialized ({device_status}, interval: {self.config.device_approval.polling_interval}s)")
+        logger.ok(f"Cloud SSO Device Approval poller initialized ({device_status}, interval: {self.config.device_approval.polling_interval_in_sec}s)")
         
         # Initialize App Home handler
         self.app_home_handler = AppHomeHandler(self.config, self.keeper_client)
