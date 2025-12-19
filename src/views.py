@@ -17,7 +17,7 @@ Slack UI builders using Block Kit.
 import json
 from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
-from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options
+from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
 
 
 def post_approval_request(
@@ -30,7 +30,7 @@ def post_approval_request(
     is_uid: bool,
     request_type: RequestType,
     justification: str,
-    duration: str = "24h",
+    duration: str = "1h",
     record_details = None,
     folder_details = None
 ):
@@ -58,6 +58,9 @@ def post_approval_request(
         "duration": duration
     }
     
+    # Sanitize justification to prevent malicious hyperlinks
+    safe_justification = sanitize_hyperlinks(justification)
+    
     blocks = [
         {
             "type": "header",
@@ -69,8 +72,7 @@ def post_approval_request(
                 {"type": "mrkdwn", "text": f"*Requester:*\n<@{requester_id}>"},
                 {"type": "mrkdwn", "text": f"*Request ID:*\n`{approval_id}`"},
                 {"type": "mrkdwn", "text": f"*{item_type}:*\n`{identifier}`"},
-                {"type": "mrkdwn", "text": f"*Format:*\n{'UID' if is_uid else 'Description'}"},
-                {"type": "mrkdwn", "text": f"*Justification:*\n{justification}"},
+                {"type": "mrkdwn", "text": f"*Justification:*\n{safe_justification}"},
                 {"type": "mrkdwn", "text": f"*Requested:*\n{format_timestamp()}"}
             ]
         },
@@ -138,8 +140,8 @@ def post_approval_request(
                 },
                 "options": get_duration_options(),
                 "initial_option": {
-                    "text": {"type": "plain_text", "text": "24 hours"},
-                    "value": "24h"
+                    "text": {"type": "plain_text", "text": "1 hour"},
+                    "value": "1h"
                 }
             }
         })
@@ -185,7 +187,9 @@ def post_approval_request(
     client.chat_postMessage(
         channel=approvals_channel,
         blocks=blocks,
-        text=f"{title} from @{requester_name}"
+        text=f"{title} from @{requester_name}",
+        unfurl_links=False,
+        unfurl_media=False
     )
 
 def build_permission_selector_block(request_type: RequestType, for_modal: bool = False) -> Dict[str, Any]:
@@ -228,7 +232,7 @@ def build_permission_selector_block(request_type: RequestType, for_modal: bool =
                 "value": PermissionLevel.CHANGE_OWNER.value
             }
         ]
-        initial_option = options[1]  # "Can Edit" by default
+        initial_option = options[0]  # "View Only" by default (minimum access)
     else:  # FOLDER
         options = [
             {
@@ -472,8 +476,8 @@ def build_search_modal(
                         "action_id": "grant_duration_select",
                         "options": get_duration_options(),
                         "initial_option": {
-                            "text": {"type": "plain_text", "text": "24 hours"},
-                            "value": "24h"
+                            "text": {"type": "plain_text", "text": "1 hour"},
+                            "value": "1h"
                         }
                     },
                     "hint": {
@@ -690,8 +694,8 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "action_id": "expiration_select",
                 "placeholder": {"type": "plain_text", "text": "Select expiration time"},
                 "initial_option": {
-                    "text": {"type": "plain_text", "text": "24 hours"},
-                    "value": "24h"
+                    "text": {"type": "plain_text", "text": "1 hour"},
+                    "value": "1h"
                 },
                 "options": [
                     {
@@ -903,7 +907,7 @@ def post_pedm_approval_request(
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "PEDM Approval Request"}
+            "text": {"type": "plain_text", "text": "Privilege Elevation Approval Request"}
         },
         {
             "type": "section",
@@ -961,7 +965,9 @@ def post_pedm_approval_request(
         client.chat_postMessage(
             channel=approvals_channel,
             blocks=blocks,
-            text=f"PEDM Approval Request from {request.username}"
+            text=f"PEDM Approval Request from {request.username}",
+            unfurl_links=False,
+            unfurl_media=False
         )
         print(f"[OK] Posted PEDM request {request.approval_uid} to Slack")
     except Exception as e:
