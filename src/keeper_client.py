@@ -16,6 +16,7 @@ All backend Logic is being written in this module.
 """
 
 import requests
+import shlex
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
@@ -83,7 +84,7 @@ class KeeperClient:
         try:
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c r "{query}" --format=json'},
+                json={"command": f'search -c r {shlex.quote(query)} --format=json'},
                 timeout=10
             )
             
@@ -121,7 +122,7 @@ class KeeperClient:
             # Use search command with shared folder category filter (-c s)
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c s "{query}" --format=json'},
+                json={"command": f'search -c s {shlex.quote(query)} --format=json'},
                 timeout=10
             )
             
@@ -895,32 +896,26 @@ class KeeperClient:
             
             # Add record type (lowercase, space-separated, no quotes)
             command_parts.append('--record-type login')
-            
-            # Title is required (space-separated with single quotes)
-            title_escaped = title.replace("'", "\\'")
-            command_parts.append(f"--title '{title_escaped}'")
+            command_parts.append(f"--title {shlex.quote(title)}")
 
             if notes:
-                notes_escaped = notes.replace('\n', '\\n').replace('"', '\\"')
-                command_parts.append(f'--notes "{notes_escaped}"')
+                notes_for_cli = notes.replace('\n', '\\n')
+                command_parts.append(f'--notes {shlex.quote(notes_for_cli)}')
             
             # Self-destruct (space-separated, no quotes on duration)
             if self_destruct_duration:
                 command_parts.append(f'--self-destruct {self_destruct_duration}')
 
             if login:
-                login_escaped = login.replace(' ', '\\ ')
-                command_parts.append(f'login={login_escaped}')
+                command_parts.append(f'login={shlex.quote(login)}')
             
             if password:
-                password_escaped = password.replace(' ', '\\ ')
-                command_parts.append(f'password={password_escaped}')
+                command_parts.append(f'password={shlex.quote(password)}')
             elif generate_password:
                 command_parts.append('password=$GEN')
             
             if url:
-                url_escaped = url.replace(' ', '\\ ')
-                command_parts.append(f'url={url_escaped}')
+                command_parts.append(f'url={shlex.quote(url)}')
             
             command = " ".join(command_parts)
 
@@ -971,7 +966,7 @@ class KeeperClient:
                 try:
                     search_response = self.session.post(
                         f'{self.base_url}/executecommand-async',
-                        json={"command": f'search "{title}" --format=json'},
+                        json={"command": f'search {shlex.quote(title)} --format=json'},
                         timeout=10
                     )
                     
@@ -1270,6 +1265,11 @@ class KeeperClient:
             result_data = self._poll_for_result(request_id, max_wait=10)
             
             if result_data and result_data.get('status') == 'success':
+                message = result_data.get('message', '')
+                # Check if device was already handled (approved/denied elsewhere)
+                if 'no pending devices' in message.lower():
+                    logger.warning(f"Device {device_id} was already processed")
+                    return {'success': False, 'already_handled': True, 'error': 'This device request was already processed'}
                 logger.ok(f"Device {device_id} approved successfully")
                 return {'success': True}
             else:
@@ -1304,6 +1304,11 @@ class KeeperClient:
             result_data = self._poll_for_result(request_id, max_wait=10)
             
             if result_data and result_data.get('status') == 'success':
+                message = result_data.get('message', '')
+                # Check if device was already handled (approved/denied elsewhere)
+                if 'no pending devices' in message.lower():
+                    logger.warning(f"Device {device_id} was already processed")
+                    return {'success': False, 'already_handled': True, 'error': 'This device request was already processed'}
                 logger.ok(f"Device {device_id} denied successfully")
                 return {'success': True}
             else:

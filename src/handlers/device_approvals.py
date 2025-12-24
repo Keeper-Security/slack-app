@@ -59,9 +59,14 @@ def handle_approve_device(body: Dict[str, Any], client, config, keeper_client):
             
             logger.ok(f"Device {device_id} approved by {approver_id}")
         else:
-            # Update with error
-            error_msg = result.get('error', 'Unknown error')
-            status_text = f"*Status:* Approval failed - {error_msg}"
+            # Check if already handled elsewhere
+            if result.get('already_handled'):
+                status_text = f"*Status:* Already processed (approved/denied elsewhere)\n*Checked by:* <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+                logger.warning(f"Device {device_id} was already processed")
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                status_text = f"*Status:* Approval failed - {error_msg}"
+                logger.error(f"Failed to approve device {device_id}: {error_msg}")
             
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
@@ -76,8 +81,6 @@ def handle_approve_device(body: Dict[str, Any], client, config, keeper_client):
                 blocks=updated_blocks,
                 text=status_text
             )
-            
-            logger.error(f"Failed to approve device {device_id}: {error_msg}")
             
     except Exception as e:
         logger.error(f"Exception in device approve handler: {e}")
@@ -129,9 +132,14 @@ def handle_deny_device(body: Dict[str, Any], client, config, keeper_client):
             
             logger.ok(f"Device {device_id} denied by {approver_id}")
         else:
-            # Update with error
-            error_msg = result.get('error', 'Unknown error')
-            status_text = f"*Status:* Denial failed - {error_msg}"
+            # Check if already handled elsewhere 
+            if result.get('already_handled'):
+                status_text = f"*Status:* Already processed (approved/denied elsewhere)\n*Checked by:* <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+                logger.warning(f"Device {device_id} was already processed")
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                status_text = f"*Status:* Denial failed - {error_msg}"
+                logger.error(f"Failed to deny device {device_id}: {error_msg}")
             
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
@@ -146,8 +154,6 @@ def handle_deny_device(body: Dict[str, Any], client, config, keeper_client):
                 blocks=updated_blocks,
                 text=status_text
             )
-            
-            logger.error(f"Failed to deny device {device_id}: {error_msg}")
             
     except Exception as e:
         logger.error(f"Exception in device deny handler: {e}")
