@@ -30,16 +30,22 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
     user_name = body["user_name"]
     text = body.get("text", "").strip()
     
-    # Validate input
+    # Validate input - if no text, open modal for user input
     if not text:
-        respond(
-            text="*Usage:* `/keeper-request-folder \"Folder UID or Description\" Justification message or ticket number`\n\n"
-                 "*Examples:*\n"
-                 "• `/keeper-request-folder kF8zQ2Nm5Wx9PtR3sY7a Need staging access`\n"
-                 "• `/keeper-request-folder \"Staging Team Folder\" JIRA-1234 Need access for deployment`\n\n"
-                 "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs",
-            response_type="ephemeral"
-        )
+        from ..views import build_request_modal
+        channel_id = body.get("channel_id", "")
+        response_url = body.get("response_url", "")
+        try:
+            client.views_open(
+                trigger_id=body["trigger_id"],
+                view=build_request_modal(user_id, user_name, channel_id, response_url, "folder")
+            )
+        except Exception as e:
+            logger.error(f"Failed to open request folder modal: {e}")
+            respond(
+                text="Failed to open request form. Please try again.",
+                response_type="ephemeral"
+            )
         return
 
     identifier, justification = parse_command_text(text)

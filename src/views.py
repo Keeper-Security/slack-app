@@ -1044,3 +1044,82 @@ def post_device_approval_request(
         print(f"[OK] Posted device approval request {device_id} to Slack")
     except Exception as e:
         print(f"[ERROR] Failed to post device approval to Slack: {e}")
+
+
+def build_request_modal(
+    user_id: str,
+    user_name: str,
+    channel_id: str,
+    response_url: str = "",
+    request_type: str = "record"
+) -> Dict[str, Any]:
+    """
+    Build modal for access requests when user runs command without arguments.
+    """
+    config = {
+        "record": {
+            "callback_id": "request_record_modal_submit",
+            "title": "Request Record Access",
+            "header": "*Request access to a record*\n\nFill in the details below to submit your request for approval.",
+            "block_id": "record_identifier",
+            "label": "Record UID or Description",
+            "placeholder": 'e.g., kR3cF9Xm2Lp8NqT1uV6w or "Production Database"'
+        },
+        "folder": {
+            "callback_id": "request_folder_modal_submit",
+            "title": "Request Folder Access",
+            "header": "*Request access to a folder*\n\nFill in the details below to submit your request for approval.",
+            "block_id": "folder_identifier",
+            "label": "Folder UID or Description",
+            "placeholder": 'e.g., kF8zQ2Nm5Wx9PtR3sY7a or "Staging Team Folder"'
+        },
+        "one_time_share": {
+            "callback_id": "one_time_share_modal_submit",
+            "title": "One-Time Share",
+            "header": "*Request a one-time share link*\n\nFill in the details below to submit your request for approval.",
+            "block_id": "record_identifier",
+            "label": "Record UID or Description",
+            "placeholder": 'e.g., kR3cF9Xm2Lp8NqT1uV6w or "AWS Production Password"'
+        }
+    }
+    
+    cfg = config[request_type]
+    
+    return {
+        "type": "modal",
+        "callback_id": cfg["callback_id"],
+        "title": {"type": "plain_text", "text": cfg["title"]},
+        "submit": {"type": "plain_text", "text": "Submit Request"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": json.dumps({
+            "user_id": user_id,
+            "user_name": user_name,
+            "channel_id": channel_id,
+            "response_url": response_url
+        }),
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": cfg["header"]}},
+            {"type": "divider"},
+            {
+                "type": "input",
+                "block_id": cfg["block_id"],
+                "label": {"type": "plain_text", "text": cfg["label"]},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "identifier_input",
+                    "placeholder": {"type": "plain_text", "text": cfg["placeholder"]}
+                }
+            },
+            {
+                "type": "input",
+                "block_id": "justification",
+                "label": {"type": "plain_text", "text": "Justification"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "justification_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": "e.g., JIRA-1234 Justification message"}
+                }
+            }
+        ]
+    }
