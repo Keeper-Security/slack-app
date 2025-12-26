@@ -371,6 +371,25 @@ class KeeperSlackApp:
                 logger.error(f"Error creating record: {e}")
                 import traceback
                 traceback.print_exc()
+        
+        # Command input modals (when user runs command without arguments)
+        @self.slack_app.view("request_record_modal_submit")
+        def view_request_record_submit(ack, body, client):
+            from .handlers.modals import handle_request_record_modal_submit
+            result = handle_request_record_modal_submit(body, client, self.config, self.keeper_client)
+            ack(result) if result else ack()
+        
+        @self.slack_app.view("request_folder_modal_submit")
+        def view_request_folder_submit(ack, body, client):
+            from .handlers.modals import handle_request_folder_modal_submit
+            result = handle_request_folder_modal_submit(body, client, self.config, self.keeper_client)
+            ack(result) if result else ack()
+        
+        @self.slack_app.view("one_time_share_modal_submit")
+        def view_one_time_share_submit(ack, body, client):
+            from .handlers.modals import handle_one_time_share_modal_submit
+            result = handle_one_time_share_modal_submit(body, client, self.config, self.keeper_client)
+            ack(result) if result else ack()
     
     def _register_app_home_events(self):
         """Register App Home tab event handlers."""

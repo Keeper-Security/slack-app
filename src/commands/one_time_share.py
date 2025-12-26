@@ -30,17 +30,22 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
     user_name = body["user_name"]
     text = body.get("text", "").strip()
     
-    # Validate input
+    # Validate input - if no text, open modal for user input
     if not text:
-        respond(
-            text="*Usage:* `/keeper-one-time-share \"Record UID or Description\" Justification message or ticket number`\n\n"
-                 "*Examples:*\n"
-                 "• `/keeper-one-time-share kR3cF9Xm2Lp8NqT1uV6w Need to share with contractor John`\n"
-                 "• `/keeper-one-time-share \"AWS Production Password\" JIRA-1234 Need to share with vendor`\n\n"
-                 "*Tip:* Quotes are required for descriptions with spaces, but optional for UIDs",
-                 
-            response_type="ephemeral"
-        )
+        from ..views import build_request_modal
+        channel_id = body.get("channel_id", "")
+        response_url = body.get("response_url", "")
+        try:
+            client.views_open(
+                trigger_id=body["trigger_id"],
+                view=build_request_modal(user_id, user_name, channel_id, response_url, "one_time_share")
+            )
+        except Exception as e:
+            logger.error(f"Failed to open one-time share modal: {e}")
+            respond(
+                text="Failed to open request form. Please try again.",
+                response_type="ephemeral"
+            )
         return
     
     # Parse command text

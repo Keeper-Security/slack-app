@@ -13,11 +13,35 @@
 """Handlers for modal dialog submissions."""
 
 import json
+import requests
 from typing import Dict, Any
-from ..models import PermissionLevel
-from ..views import update_approval_message, send_access_granted_dm
-from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack
+from ..models import PermissionLevel, RequestType
+from ..views import update_approval_message, send_access_granted_dm, post_approval_request
+from ..utils import (
+    parse_duration_to_seconds, format_duration, get_user_email_from_slack,
+    generate_approval_id, is_valid_uid, sanitize_user_input,
+    MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH
+)
 from ..logger import logger
+
+
+def _send_ephemeral_response(response_url: str, text: str) -> bool:
+    """
+    Send ephemeral response using the slash command's response_url.
+    """
+    try:
+        resp = requests.post(
+            response_url,
+            json={
+                "text": text,
+                "response_type": "ephemeral"
+            },
+            timeout=5
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.warning(f"Failed to send response via response_url: {e}")
+        return False
 
 
 def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper_client):
@@ -630,3 +654,276 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
             "Error creating record",
             str(e)
         )
+
+
+def handle_request_record_modal_submit(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle request record modal submission.
+    Creates an approval request for record access.
+    """
+
+    metadata = json.loads(body["view"]["private_metadata"])
+    user_id = metadata["user_id"]
+    user_name = metadata["user_name"]
+    response_url = metadata.get("response_url", "")
+    
+
+    values = body["view"]["state"]["values"]
+    identifier = (values.get("record_identifier", {}).get("identifier_input", {}).get("value") or "").strip()
+    justification = (values.get("justification", {}).get("justification_input", {}).get("value") or "").strip()
+    
+    # Validate inputs
+    if not identifier:
+        return {
+            "response_action": "errors",
+            "errors": {"record_identifier": "Record UID or description is required"}
+        }
+    
+    if not justification:
+        return {
+            "response_action": "errors",
+            "errors": {"justification": "Justification is required"}
+        }
+    
+
+    identifier, id_valid, id_error = sanitize_user_input(identifier, MAX_IDENTIFIER_LENGTH)
+    if not id_valid:
+        return {"response_action": "errors", "errors": {"record_identifier": id_error}}
+    
+    justification, just_valid, just_error = sanitize_user_input(justification, MAX_JUSTIFICATION_LENGTH)
+    if not just_valid:
+        return {"response_action": "errors", "errors": {"justification": just_error}}
+    
+    # Check if UID or description
+    is_uid = is_valid_uid(identifier)
+    
+
+    record_details = None
+    if is_uid:
+        record_details = keeper_client.get_record_by_uid(identifier)
+        if not record_details:
+            return {"response_action": "errors", "errors": {"record_identifier": f"No record found with UID: {identifier}"}}
+        
+        # Validate it's actually a record, not a folder
+        if record_details.record_type in ['folder', 'shared_folder', 'user_folder']:
+            return {"response_action": "errors", "errors": {"record_identifier": "This is a folder. Please use /keeper-request-folder instead."}}
+    
+    # Generate approval ID and post request
+    approval_id = generate_approval_id()
+    
+    try:
+        post_approval_request(
+            client=client,
+            approvals_channel=config.slack.approvals_channel_id,
+            approval_id=approval_id,
+            requester_id=user_id,
+            requester_name=user_name,
+            identifier=identifier,
+            is_uid=is_uid,
+            request_type=RequestType.RECORD,
+            justification=justification,
+            duration="1h",
+            record_details=record_details
+        )
+        logger.info(f"Record access request {approval_id} submitted via modal by {user_id}")
+        
+        # Send ephemeral confirmation using response_url (same as respond() in slash commands)
+        confirmation_text = (
+            f"*Record access request submitted!*\n\n"
+            f"Request ID: `{approval_id}`\n"
+            f"Record: `{identifier}`\n"
+            f"Justification: {justification}\n\n"
+            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Once approved, please check your DM for details."
+        )
+        
+        if response_url:
+            _send_ephemeral_response(response_url, confirmation_text)
+        
+    except Exception as e:
+        logger.error(f"Error posting record request from modal: {e}")
+        return {"response_action": "errors", "errors": {"record_identifier": f"Failed to submit request: {str(e)}"}}
+    
+    return None
+
+
+def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle request folder modal submission.
+    Creates an approval request for folder access.
+    """
+
+    metadata = json.loads(body["view"]["private_metadata"])
+    user_id = metadata["user_id"]
+    user_name = metadata["user_name"]
+    response_url = metadata.get("response_url", "")
+    
+
+    values = body["view"]["state"]["values"]
+    identifier = (values.get("folder_identifier", {}).get("identifier_input", {}).get("value") or "").strip()
+    justification = (values.get("justification", {}).get("justification_input", {}).get("value") or "").strip()
+    
+
+    if not identifier:
+        return {
+            "response_action": "errors",
+            "errors": {"folder_identifier": "Folder UID or description is required"}
+        }
+    
+    if not justification:
+        return {
+            "response_action": "errors",
+            "errors": {"justification": "Justification is required"}
+        }
+    
+    # Sanitize inputs
+    identifier, id_valid, id_error = sanitize_user_input(identifier, MAX_IDENTIFIER_LENGTH)
+    if not id_valid:
+        return {"response_action": "errors", "errors": {"folder_identifier": id_error}}
+    
+    justification, just_valid, just_error = sanitize_user_input(justification, MAX_JUSTIFICATION_LENGTH)
+    if not just_valid:
+        return {"response_action": "errors", "errors": {"justification": just_error}}
+    
+    # Check if UID or description
+    is_uid = is_valid_uid(identifier)
+    
+    # Fetch folder details if UID
+    folder_details = None
+    if is_uid:
+        folder_details = keeper_client.get_folder_by_uid(identifier)
+        if not folder_details:
+            return {"response_action": "errors", "errors": {"folder_identifier": f"No folder found with UID: {identifier}"}}
+        
+        # Validate it's actually a folder, not a record
+        if folder_details.folder_type == 'record':
+            return {"response_action": "errors", "errors": {"folder_identifier": "This is a record. Please use /keeper-request-record instead."}}
+    
+    # Generate approval ID and post request
+    approval_id = generate_approval_id()
+    
+    try:
+        post_approval_request(
+            client=client,
+            approvals_channel=config.slack.approvals_channel_id,
+            approval_id=approval_id,
+            requester_id=user_id,
+            requester_name=user_name,
+            identifier=identifier,
+            is_uid=is_uid,
+            request_type=RequestType.FOLDER,
+            justification=justification,
+            duration="1h",
+            folder_details=folder_details
+        )
+        logger.info(f"Folder access request {approval_id} submitted via modal by {user_id}")
+        
+        # Send ephemeral confirmation using response_url (same as respond() in slash commands)
+        confirmation_text = (
+            f"*Folder access request submitted!*\n\n"
+            f"Request ID: `{approval_id}`\n"
+            f"Folder: `{identifier}`\n"
+            f"Justification: {justification}\n\n"
+            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Once approved, please check your DM for details."
+        )
+        
+        if response_url:
+            _send_ephemeral_response(response_url, confirmation_text)
+        
+    except Exception as e:
+        logger.error(f"Error posting folder request from modal: {e}")
+        return {"response_action": "errors", "errors": {"folder_identifier": f"Failed to submit request: {str(e)}"}}
+    
+    return None
+
+
+def handle_one_time_share_modal_submit(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle one-time share modal submission.
+    Creates an approval request for generating a one-time share link.
+    """
+
+    metadata = json.loads(body["view"]["private_metadata"])
+    user_id = metadata["user_id"]
+    user_name = metadata["user_name"]
+    response_url = metadata.get("response_url", "")
+    
+
+    values = body["view"]["state"]["values"]
+    identifier = (values.get("record_identifier", {}).get("identifier_input", {}).get("value") or "").strip()
+    justification = (values.get("justification", {}).get("justification_input", {}).get("value") or "").strip()
+    
+
+    if not identifier:
+        return {
+            "response_action": "errors",
+            "errors": {"record_identifier": "Record UID or description is required"}
+        }
+    
+    if not justification:
+        return {
+            "response_action": "errors",
+            "errors": {"justification": "Justification is required"}
+        }
+    
+
+    identifier, id_valid, id_error = sanitize_user_input(identifier, MAX_IDENTIFIER_LENGTH)
+    if not id_valid:
+        return {"response_action": "errors", "errors": {"record_identifier": id_error}}
+    
+    justification, just_valid, just_error = sanitize_user_input(justification, MAX_JUSTIFICATION_LENGTH)
+    if not just_valid:
+        return {"response_action": "errors", "errors": {"justification": just_error}}
+    
+    # Check if UID or description
+    is_uid = is_valid_uid(identifier)
+    
+
+    record_details = None
+    if is_uid:
+        record_details = keeper_client.get_record_by_uid(identifier)
+        if not record_details:
+            return {"response_action": "errors", "errors": {"record_identifier": f"No record found with UID: {identifier}"}}
+        
+
+        if record_details.record_type in ['folder', 'shared_folder', 'user_folder']:
+            return {"response_action": "errors", "errors": {"record_identifier": "One-time share links can only be created for records, not folders."}}
+    
+    # Generate approval ID and post request
+    approval_id = generate_approval_id()
+    
+    try:
+        post_approval_request(
+            client=client,
+            approvals_channel=config.slack.approvals_channel_id,
+            approval_id=approval_id,
+            requester_id=user_id,
+            requester_name=user_name,
+            identifier=identifier,
+            is_uid=is_uid,
+            request_type=RequestType.ONE_TIME_SHARE,
+            justification=justification,
+            duration="1h",
+            record_details=record_details
+        )
+        logger.info(f"One-time share request {approval_id} submitted via modal by {user_id}")
+        
+        # Send ephemeral confirmation using response_url (same as respond() in slash commands)
+        confirmation_text = (
+            f"*One-Time Share request submitted!*\n\n"
+            f"Request ID: `{approval_id}`\n"
+            f"Record: `{identifier}`\n"
+            f"Justification: {justification}\n\n"
+            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Once approved, the one-time share link will be sent to you via DM."
+        )
+        
+        if response_url:
+            _send_ephemeral_response(response_url, confirmation_text)
+        
+    except Exception as e:
+        logger.error(f"Error posting one-time share request from modal: {e}")
+        return {"response_action": "errors", "errors": {"record_identifier": f"Failed to submit request: {str(e)}"}}
+    
+    return None
