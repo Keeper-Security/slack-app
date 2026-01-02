@@ -20,6 +20,22 @@ from ..utils import parse_duration_to_seconds, format_duration, get_user_email_f
 from ..logger import logger
 
 
+def _is_permission_conflict_error(error_message: str) -> bool:
+    """
+    Check if the error is a permission conflict that requires manual revocation.
+    These errors should not update the approval card state.
+    """
+    error_lower = error_message.lower()
+    conflict_indicators = [
+        "already has temporary access",
+        "already has existing permissions",
+        "conflicts with the selected permission level",
+        "first remove the user's existing access",
+        "first revoke the user's existing access"
+    ]
+    return any(indicator in error_lower for indicator in conflict_indicators)
+
+
 def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     """
     Handle approve button click.
@@ -233,16 +249,32 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
-            # Approval failed - update approval message
+            # Approval failed - check if it's a permission conflict
             error_message = result.get('error', 'Unknown error')
             
-            update_approval_message(
-                client=client,
-                channel_id=body["channel"]["id"],
-                message_ts=body["message"]["ts"],
-                status=f"Approval failed: {error_message}",
-                original_blocks=body["message"]["blocks"]
-            )
+            if _is_permission_conflict_error(error_message):
+                # Permission conflict - don't update card, send DM to approver
+                logger.info(f"Approval {approval_id}: Permission conflict detected, sending DM to approver")
+                from ..utils import send_error_dm
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Cannot Grant Access - Permission Conflict",
+                    message=f"{error_message}\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {item_title}\n\n"
+                            f"The approval request remains active. Please revoke the user's existing access first, "
+                            f"then try approving again."
+                )
+            else:
+                # Other error - update approval card as failed
+                update_approval_message(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    status=f"Approval failed: {error_message}",
+                    original_blocks=body["message"]["blocks"]
+                )
             logger.info(f"Approval {approval_id}: Failed for {requester_id} - {error_message}")
     except Exception as e:
         logger.error(f"Error in approve handler: {e}")
