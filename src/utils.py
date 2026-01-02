@@ -261,7 +261,7 @@ def format_duration(duration_str: str) -> str:
         '24h': '24 hours',
         '7d': '7 days',
         '30d': '30 days',
-        'permanent': 'Permanent'
+        'permanent': 'No Expiration'
     }
     return mapping.get(duration_str, '1 hour')
 
@@ -296,7 +296,7 @@ def get_duration_options() -> list:
             "value": "30d"
         },
         {
-            "text": {"type": "plain_text", "text": "Permanent"},
+            "text": {"type": "plain_text", "text": "No Expiration"},
             "value": "permanent"
         }
     ]

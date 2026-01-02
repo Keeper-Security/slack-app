@@ -68,7 +68,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         # Force permanent access for these permissions
         duration_seconds = None
         duration_value = "permanent"
-        duration_text = "Permanent"
+        duration_text = "No Expiration"
         logger.info(f"{permission.value} is permanent-only, ignoring duration selector")
     else:
         # Normal duration handling
@@ -78,16 +78,16 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         # If state exists but no duration value, user cleared it (should be permanent)
         # If duration is "permanent", set to None for no expiration
         if duration_value == "permanent":
-            # User explicitly selected "Permanent"
+            # User explicitly selected "No Expiration"
             duration_seconds = None
             duration_value = "permanent"
-            duration_text = "Permanent"
+            duration_text = "No Expiration"
             logger.info("Duration explicitly set to permanent")
         elif state and 'values' in state and not duration_value:
             # User cleared the duration selector (should be permanent)
             duration_seconds = None
             duration_value = "permanent"
-            duration_text = "Permanent"
+            duration_text = "No Expiration"
             logger.info("Duration cleared by user, treating as permanent")
         elif not duration_value:
             # No state interaction yet, fall back to action_data default
@@ -156,7 +156,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             else:
                 # Access granted
                 if is_permanent:
-                    status_msg = "*Permanent Access Granted*\nNo expiration - Access remains active indefinitely"
+                    status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                 else:
                     status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
                 approval_text = "Access Request Approved"

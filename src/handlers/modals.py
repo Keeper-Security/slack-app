@@ -172,25 +172,25 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             # Force permanent access for these permissions
             duration_seconds = None
             duration_value = "permanent"
-            duration_text = "Permanent"
+            duration_text = "No Expiration"
             logger.info(f"{permission_value} is permanent-only, ignoring duration selector")
         else:
             # Normal duration handling for View Only and Can Edit
             duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
-            duration_value = duration_block.get("selected_option", {}).get("value")
+            # Handle the case where selected_option is null (when field is cleared)
+            selected_option = duration_block.get("selected_option") or {}
+            duration_value = selected_option.get("value")
             
             # Check if duration was cleared/not selected or set to permanent
             if duration_value == "permanent":
-                # User explicitly selected "Permanent"
+                # User explicitly selected "No Expiration"
                 duration_seconds = None
-                duration_text = "Permanent"
-                logger.info("Duration explicitly set to permanent")
+                duration_text = "No Expiration"
             elif not duration_value:
                 # User cleared or didn't select duration (optional field) - treat as permanent
                 duration_seconds = None
                 duration_value = "permanent"
-                duration_text = "Permanent"
-                logger.info("Duration not selected or cleared, treating as permanent")
+                duration_text = "No Expiration"
             else:
                 # Normal duration value selected
                 duration_seconds = parse_duration_to_seconds(duration_value)
@@ -289,7 +289,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         approval_text = "One-Time Share Request Approved"
                     else:
                         if is_permanent:
-                            status_msg = "*Permanent Access Granted*\nNo expiration - Access remains active indefinitely"
+                            status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                         else:
                             status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
                         
