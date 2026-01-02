@@ -25,6 +25,22 @@ from ..utils import (
 from ..logger import logger
 
 
+def _is_permission_conflict_error(error_message: str) -> bool:
+    """
+    Check if the error is a permission conflict that requires manual revocation.
+    These errors should not update the approval card state.
+    """
+    error_lower = error_message.lower()
+    conflict_indicators = [
+        "already has temporary access",
+        "already has existing permissions",
+        "conflicts with the selected permission level",
+        "first remove the user's existing access",
+        "first revoke the user's existing access"
+    ]
+    return any(indicator in error_lower for indicator in conflict_indicators)
+
+
 def _send_ephemeral_response(response_url: str, text: str) -> bool:
     """
     Send ephemeral response using the slash command's response_url.
@@ -172,14 +188,29 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             # Force permanent access for these permissions
             duration_seconds = None
             duration_value = "permanent"
-            duration_text = "Permanent"
+            duration_text = "No Expiration"
             logger.info(f"{permission_value} is permanent-only, ignoring duration selector")
         else:
             # Normal duration handling for View Only and Can Edit
             duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
-            duration_value = duration_block.get("selected_option", {}).get("value", "1h")
-            duration_seconds = parse_duration_to_seconds(duration_value)
-            duration_text = format_duration(duration_value)
+            # Handle the case where selected_option is null (when field is cleared)
+            selected_option = duration_block.get("selected_option") or {}
+            duration_value = selected_option.get("value")
+            
+            # Check if duration was cleared/not selected or set to permanent
+            if duration_value == "permanent":
+                # User explicitly selected "No Expiration"
+                duration_seconds = None
+                duration_text = "No Expiration"
+            elif not duration_value:
+                # User cleared or didn't select duration (optional field) - treat as permanent
+                duration_seconds = None
+                duration_value = "permanent"
+                duration_text = "No Expiration"
+            else:
+                # Normal duration value selected
+                duration_seconds = parse_duration_to_seconds(duration_value)
+                duration_text = format_duration(duration_value)
     
     # Get approver info
     approver_id = body["user"]["id"]
@@ -274,7 +305,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         approval_text = "One-Time Share Request Approved"
                     else:
                         if is_permanent:
-                            status_msg = "*Permanent Access Granted*\nNo expiration - Access remains active indefinitely"
+                            status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                         else:
                             status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
                         
@@ -337,46 +368,76 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             # Modal closed via early ack - success!
             logger.info(f"Access granted successfully for {approval_id}")
         else:
-            # Failed to grant access - show error in a NEW modal
+            # Failed to grant access
             error_msg = result.get('error', 'Unknown error')
             logger.error(f"Failed to grant access: {error_msg}")
             
-            # Open a new modal to show the error (original modal already closed)
-            try:
-                client.views_open(
-                    trigger_id=body.get("trigger_id"),
-                    view={
-                        "type": "modal",
-                        "title": {"type": "plain_text", "text": "Error"},
-                        "close": {"type": "plain_text", "text": "Close"},
-                        "blocks": [
-                            {
-                                "type": "header",
-                                "text": {"type": "plain_text", "text": "Failed to Grant Access"}
-                            },
-                            {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": error_msg
-                                }
-                            },
-                            {"type": "divider"},
-                            {
-                                "type": "context",
-                                "elements": [{
-                                    "type": "mrkdwn",
-                                    "text": "Please try again with different settings, or contact support."
-                                }]
-                            }
-                        ]
-                    }
-                )
-            except Exception as modal_error:
-                # If we can't open a modal (trigger_id expired), send DM instead
-                logger.warning(f"Could not open error modal: {modal_error}")
+            # Check if this is a permission conflict error
+            if _is_permission_conflict_error(error_msg):
+                # Permission conflict - don't update card, send DM to approver
+                logger.info(f"Permission conflict detected for approval {approval_id}, sending DM to approver")
                 from ..utils import send_error_dm
-                send_error_dm(client, approver_id, "Failed to Grant Access", error_msg)
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Cannot Grant Access - Permission Conflict",
+                    message=f"{error_msg}\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {record_title}\n\n"
+                            f"The approval request remains active in the channel. Please revoke the user's existing access first, "
+                            f"then try approving again from the approval channel."
+                )
+            else:
+                # Other error - update the approval card with error status
+                if "channel_id" in approval_data and "message_ts" in approval_data:
+                    try:
+                        from ..views import update_approval_message
+                        update_approval_message(
+                            client=client,
+                            channel_id=approval_data["channel_id"],
+                            message_ts=approval_data["message_ts"],
+                            status=f"Approval failed: {error_msg}",
+                            original_blocks=[]
+                        )
+                    except Exception as update_error:
+                        logger.error(f"Failed to update approval card: {update_error}")
+                
+                # Show error to approver via modal or DM
+                try:
+                    client.views_open(
+                        trigger_id=body.get("trigger_id"),
+                        view={
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "Error"},
+                            "close": {"type": "plain_text", "text": "Close"},
+                            "blocks": [
+                                {
+                                    "type": "header",
+                                    "text": {"type": "plain_text", "text": "Failed to Grant Access"}
+                                },
+                                {
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": error_msg
+                                    }
+                                },
+                                {"type": "divider"},
+                                {
+                                    "type": "context",
+                                    "elements": [{
+                                        "type": "mrkdwn",
+                                        "text": "Please try again with different settings if needed, or contact the requester directly."
+                                    }]
+                                }
+                            ]
+                        }
+                    )
+                except Exception as modal_error:
+                    # If we can't open a modal (trigger_id expired), send DM to approver
+                    logger.warning(f"Could not open error modal: {modal_error}")
+                    from ..utils import send_error_dm
+                    send_error_dm(client, approver_id, "Failed to Grant Access", error_msg)
             
     except Exception as e:
         logger.error(f"Error granting access from search modal: {e}")

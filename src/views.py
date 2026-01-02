@@ -776,7 +776,9 @@ def send_access_granted_dm(
     item_type: str,
     item_title: str,
     share_url: str,
-    expires_at: str
+    expires_at: str,
+    uid: str = None,
+    permission: str = None
 ):
     """Send DM to requester when access is granted."""
     try:
@@ -789,13 +791,26 @@ def send_access_granted_dm(
         else:
             access_info = "Access Type: Direct vault access (check your Keeper vault)"
 
+        # Build the message with detailed information
+        message = f"*Access Granted!*\n\n" \
+                  f"*Request ID:* `{approval_id}`\n" \
+                  f"*{item_type.capitalize()}:* {item_title}\n"
+        
+        # Add UID if provided
+        if uid:
+            message += f"*UID:* `{uid}`\n"
+        
+        message += f"*{access_info}*\n"
+        
+        # Add permission if provided
+        if permission:
+            message += f"*Permission:* {permission}\n"
+        
+        message += f"*Expires:* {expires_at}\n\n"
+
         client.chat_postMessage(
             channel=dm_channel_id,
-            text=f"*Access Granted!*\n\n"
-                 f"Request ID: `{approval_id}`\n"
-                 f"{item_type.capitalize()}: *{item_title}*\n"
-                 f"{access_info}\n"
-                 f"Expires: {expires_at}\n\n"
+            text=message
         )
     except Exception as e:
         print(f"Error sending DM to {user_id}: {e}")

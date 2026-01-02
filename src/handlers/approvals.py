@@ -20,6 +20,22 @@ from ..utils import parse_duration_to_seconds, format_duration, get_user_email_f
 from ..logger import logger
 
 
+def _is_permission_conflict_error(error_message: str) -> bool:
+    """
+    Check if the error is a permission conflict that requires manual revocation.
+    These errors should not update the approval card state.
+    """
+    error_lower = error_message.lower()
+    conflict_indicators = [
+        "already has temporary access",
+        "already has existing permissions",
+        "conflicts with the selected permission level",
+        "first remove the user's existing access",
+        "first revoke the user's existing access"
+    ]
+    return any(indicator in error_lower for indicator in conflict_indicators)
+
+
 def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     """
     Handle approve button click.
@@ -68,18 +84,36 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         # Force permanent access for these permissions
         duration_seconds = None
         duration_value = "permanent"
-        duration_text = "Permanent"
+        duration_text = "No Expiration"
         logger.info(f"{permission.value} is permanent-only, ignoring duration selector")
     else:
         # Normal duration handling
         duration_value = _extract_duration_from_blocks(message_blocks, state)
         
-        # If not found in blocks, fall back to action_data default
-        if not duration_value:
+        # Check if duration was explicitly cleared or set to permanent
+        # If state exists but no duration value, user cleared it (should be permanent)
+        # If duration is "permanent", set to None for no expiration
+        if duration_value == "permanent":
+            # User explicitly selected "No Expiration"
+            duration_seconds = None
+            duration_value = "permanent"
+            duration_text = "No Expiration"
+            logger.info("Duration explicitly set to permanent")
+        elif state and 'values' in state and not duration_value:
+            # User cleared the duration selector (should be permanent)
+            duration_seconds = None
+            duration_value = "permanent"
+            duration_text = "No Expiration"
+            logger.info("Duration cleared by user, treating as permanent")
+        elif not duration_value:
+            # No state interaction yet, fall back to action_data default
             duration_value = action_data.get("duration", "1h")
-        
-        duration_seconds = parse_duration_to_seconds(duration_value)
-        duration_text = format_duration(duration_value)
+            duration_seconds = parse_duration_to_seconds(duration_value)
+            duration_text = format_duration(duration_value)
+        else:
+            # Normal duration value found
+            duration_seconds = parse_duration_to_seconds(duration_value)
+            duration_text = format_duration(duration_value)
     
     logger.debug(f"Approve action - Duration: {duration_value} ({duration_seconds} seconds)")
     
@@ -138,7 +172,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             else:
                 # Access granted
                 if is_permanent:
-                    status_msg = "*Permanent Access Granted*\nNo expiration - Access remains active indefinitely"
+                    status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                 else:
                     status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
                 approval_text = "Access Request Approved"
@@ -209,18 +243,39 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     item_type=request_type,
                     item_title=item_title,
                     share_url=result.get('share_url', 'N/A'),
-                    expires_at=result.get('expires_at', duration_text)
+                    expires_at=result.get('expires_at', duration_text),
+                    uid=identifier,
+                    permission=permission.value
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
-            # Update with error
-            update_approval_message(
-                client=client,
-                channel_id=body["channel"]["id"],
-                message_ts=body["message"]["ts"],
-                status=f"Approval failed: {result.get('error', 'Unknown error')}",
-                original_blocks=body["message"]["blocks"]
-            )
+            # Approval failed - check if it's a permission conflict
+            error_message = result.get('error', 'Unknown error')
+            
+            if _is_permission_conflict_error(error_message):
+                # Permission conflict - don't update card, send DM to approver
+                logger.info(f"Approval {approval_id}: Permission conflict detected, sending DM to approver")
+                from ..utils import send_error_dm
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Cannot Grant Access - Permission Conflict",
+                    message=f"{error_message}\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {item_title}\n\n"
+                            f"The approval request remains active. Please revoke the user's existing access first, "
+                            f"then try approving again."
+                )
+            else:
+                # Other error - update approval card as failed
+                update_approval_message(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    status=f"Approval failed: {error_message}",
+                    original_blocks=body["message"]["blocks"]
+                )
+            logger.info(f"Approval {approval_id}: Failed for {requester_id} - {error_message}")
     except Exception as e:
         logger.error(f"Error in approve handler: {e}")
         update_approval_message(

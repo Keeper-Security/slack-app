@@ -357,12 +357,49 @@ class KeeperClient:
                 permission_flags.append("-s")
 
 
-            # Build command parts
+            # To ensure clean permission replacement (especially for downgrades like Edit&Share -> Can Edit),
+            # we first revoke existing access, then grant the new permission
+
+            
+            # Step 1: Revoke existing access
+            revoke_cmd = f"share-record {record_uid} -e {user_email} -a revoke --force"
+            
+            try:
+                revoke_response = self.session.post(
+                    f'{self.base_url}/executecommand-async',
+                    json={"command": revoke_cmd},
+                    timeout=10
+                )
+                
+                if revoke_response.status_code == 202:
+                    revoke_result = revoke_response.json()
+                    revoke_request_id = revoke_result.get('request_id')
+                    if revoke_request_id:
+                        # Wait for revoke to complete
+                        revoke_result_data = self._poll_for_result(revoke_request_id, max_wait=5)
+                        logger.debug(f"Revoke result: {revoke_result_data}")
+            except Exception as e:
+                # If revoke fails (e.g., user has no existing access), continue to grant
+                logger.debug(f"Revoke failed or skipped: {e}")
+            
+            # Step 2: Grant new permission with clean state
+            # Build command parts for grant
             cmd_parts = ["share-record", record_uid, "-e", user_email, "-a", "grant"]
             cmd_parts.extend(permission_flags)
             
-            # Add time-limited access if duration is specified
-            if duration_seconds is not None:
+            # Handle expiry based on permission type
+            # Permanent-only permissions should not have expiry
+            PERMANENT_ONLY_PERMISSIONS = [
+                PermissionLevel.CAN_SHARE,
+                PermissionLevel.EDIT_AND_SHARE,
+                PermissionLevel.CHANGE_OWNER
+            ]
+            
+            if permission in PERMANENT_ONLY_PERMISSIONS:
+                # For permanent permissions, don't add expiry
+                expires_at_str = "Never (Permanent)"
+            elif duration_seconds is not None:
+                # Add time-limited access for time-limited permissions
                 expire_in = self._format_duration(duration_seconds)
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
@@ -417,13 +454,33 @@ class KeeperClient:
                 if isinstance(error_msg, list):
                     error_msg = '\n'.join(error_msg)
                 
+
+                error_lower = error_msg.lower()
+                
                 # Check for time-limited access conflict with share permissions
-                if "time-limited access" in error_msg.lower() and "re-share" in error_msg.lower():
+                if "time-limited access" in error_lower and "re-share" in error_lower:
                     return {
                         'success': False,
                         'error': "Unable to grant record access. This user already has temporary access to this record "
                                  "which conflicts with the selected permission level.\n\n"
                                  "First remove the user's existing access, then grant the new permission."
+                    }
+                
+                # Check for existing share conflicts (e.g., Can Edit -> Can Share)
+                if "already" in error_lower and ("shared" in error_lower or "access" in error_lower):
+                    return {
+                        'success': False,
+                        'error': "Unable to update record access. This user already has existing permissions "
+                                 "that conflict with the requested permission level.\n\n"
+                                 "First revoke the user's existing access, then grant the new permission."
+                    }
+                
+                # Check for permission type conflicts
+                if "cannot" in error_lower and "permission" in error_lower:
+                    return {
+                        'success': False,
+                        'error': "Unable to grant record access. The existing permission conflicts with the new permission.\n\n"
+                                 "First revoke the user's existing access, then grant the new permission."
                     }
                 
                 return {
