@@ -74,12 +74,30 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         # Normal duration handling
         duration_value = _extract_duration_from_blocks(message_blocks, state)
         
-        # If not found in blocks, fall back to action_data default
-        if not duration_value:
+        # Check if duration was explicitly cleared or set to permanent
+        # If state exists but no duration value, user cleared it (should be permanent)
+        # If duration is "permanent", set to None for no expiration
+        if duration_value == "permanent":
+            # User explicitly selected "Permanent"
+            duration_seconds = None
+            duration_value = "permanent"
+            duration_text = "Permanent"
+            logger.info("Duration explicitly set to permanent")
+        elif state and 'values' in state and not duration_value:
+            # User cleared the duration selector (should be permanent)
+            duration_seconds = None
+            duration_value = "permanent"
+            duration_text = "Permanent"
+            logger.info("Duration cleared by user, treating as permanent")
+        elif not duration_value:
+            # No state interaction yet, fall back to action_data default
             duration_value = action_data.get("duration", "1h")
-        
-        duration_seconds = parse_duration_to_seconds(duration_value)
-        duration_text = format_duration(duration_value)
+            duration_seconds = parse_duration_to_seconds(duration_value)
+            duration_text = format_duration(duration_value)
+        else:
+            # Normal duration value found
+            duration_seconds = parse_duration_to_seconds(duration_value)
+            duration_text = format_duration(duration_value)
     
     logger.debug(f"Approve action - Duration: {duration_value} ({duration_seconds} seconds)")
     
@@ -209,18 +227,23 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     item_type=request_type,
                     item_title=item_title,
                     share_url=result.get('share_url', 'N/A'),
-                    expires_at=result.get('expires_at', duration_text)
+                    expires_at=result.get('expires_at', duration_text),
+                    uid=identifier,
+                    permission=permission.value
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
-            # Update with error
+            # Approval failed - update approval message
+            error_message = result.get('error', 'Unknown error')
+            
             update_approval_message(
                 client=client,
                 channel_id=body["channel"]["id"],
                 message_ts=body["message"]["ts"],
-                status=f"Approval failed: {result.get('error', 'Unknown error')}",
+                status=f"Approval failed: {error_message}",
                 original_blocks=body["message"]["blocks"]
             )
+            logger.info(f"Approval {approval_id}: Failed for {requester_id} - {error_message}")
     except Exception as e:
         logger.error(f"Error in approve handler: {e}")
         update_approval_message(
