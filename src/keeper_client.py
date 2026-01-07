@@ -707,25 +707,6 @@ class KeeperClient:
                     }
             
             if result_data.get('status') == 'success':
-                # Check if this was an invitation (user not in vault yet)
-                message = result_data.get('message', [])
-                if isinstance(message, list):
-                    message_text = ' '.join(message).lower()
-                else:
-                    message_text = str(message).lower()
-                
-                if 'invitation has been sent' in message_text or 'repeat this command when invitation is accepted' in message_text:
-                    # Invitation sent - user doesn't exist in vault yet
-                    logger.info(f"Share invitation sent to user (not in vault yet)")
-                    return {
-                        'success': True,
-                        'invitation_sent': True,
-                        'expires_at': 'Pending Invitation',
-                        'permission': permission.value,
-                        'duration': 'permanent',
-                        'message': 'Share invitation sent. User must accept the invitation and create a Keeper account before they can access this folder.'
-                    }
-                
                 return {
                     'success': True,
                     'expires_at': expires_at_str,
