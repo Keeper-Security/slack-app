@@ -288,6 +288,58 @@ class KeeperClient:
             traceback.print_exc()
             return None
     
+    def get_folder_owner(self, folder_uid: str) -> Optional[str]:
+        """
+        Get the owner email of a folder.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": f"get --format=json {folder_uid}"},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                logger.error(f"Failed to submit get command: {response.status_code}")
+                return None
+            
+            result_data = response.json()
+            request_id = result_data.get('request_id')
+            
+            if not request_id:
+                logger.error("No request_id in response")
+                return None
+            
+            # Poll for results
+            final_result = self._poll_for_result(request_id)
+            
+            if not final_result:
+                logger.warning(f"No result for folder UID: {folder_uid}")
+                return None
+
+            data = final_result.get('data')
+            
+            if not data:
+                logger.warning(f"No data in get result for UID: {folder_uid}")
+                return None
+
+            user_permissions = data.get('user_permissions', [])
+            
+            for user_perm in user_permissions:
+                if user_perm.get('owner', False):
+                    owner_email = user_perm.get('username')
+                    logger.info(f"Found folder owner: {owner_email}")
+                    return owner_email
+            
+            logger.warning(f"No owner found in user_permissions for folder: {folder_uid}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get folder owner for {folder_uid}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def get_folder_by_uid(self, folder_uid: str) -> Optional[KeeperFolder]:
         """
         Get folder details by UID using Service Mode.
@@ -608,6 +660,18 @@ class KeeperClient:
         Grant access to a folder with optional time limit using share-folder command.
         """
         try:
+            # Prevent granting access to folder owner
+            folder_owner = self.get_folder_owner(folder_uid)
+
+            if folder_owner and user_email.lower() == folder_owner.lower():
+                return {
+                    'success': False,
+                    'error': (
+                        f"Cannot grant access to folder owner ({user_email}). "
+                        f"The user already owns this folder and has access to it."
+                    )
+                }
+            
             # Map permission level to share-folder flags
             permission_flags = []
             
@@ -691,6 +755,25 @@ class KeeperClient:
                     }
             
             if result_data.get('status') == 'success':
+                # Check if this was an invitation (user not in vault yet)
+                message = result_data.get('message', [])
+                if isinstance(message, list):
+                    message_text = ' '.join(message).lower()
+                else:
+                    message_text = str(message).lower()
+                
+                if 'invitation has been sent' in message_text or 'repeat this command when invitation is accepted' in message_text:
+                    # Invitation sent - user doesn't exist in vault yet
+                    logger.info(f"Share invitation sent to user (not in vault yet)")
+                    return {
+                        'success': True,
+                        'invitation_sent': True,
+                        'expires_at': 'Pending Invitation',
+                        'permission': permission.value,
+                        'duration': 'permanent',
+                        'message': 'Share invitation sent. User must accept the invitation and create a Keeper account before they can access this folder.'
+                    }
+                
                 return {
                     'success': True,
                     'expires_at': expires_at_str,

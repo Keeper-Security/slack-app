@@ -45,11 +45,13 @@ def is_valid_uid(identifier: str) -> bool:
 
 
 def is_record_owner_error(error_message: str) -> bool:
-    """Check if error is due to user being the record owner."""
+    """Check if error is due to user being the record/folder owner."""
     error_lower = error_message.lower()
     return (
         "cannot grant access to record owner" in error_lower or
-        "already owns this record" in error_lower
+        "cannot grant access to folder owner" in error_lower or
+        "already owns this record" in error_lower or
+        "already owns this folder" in error_lower
     )
 
 

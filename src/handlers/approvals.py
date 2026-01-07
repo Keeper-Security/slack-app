@@ -301,12 +301,10 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 send_error_dm(
                     client=client,
                     user_id=approver_id,
-                    title="Cannot Grant Access - User is Record Owner",
-                    message=f"The user <@{requester_id}> already owns this {request_type} and has full access to it.\n\n"
+                    title="Access grant failed:",
+                    message=f"The selected user is the current owner of this {request_type} and already has full permissions.\n\n"
                             f"*Request ID:* `{approval_id}`\n"
-                            f"*{request_type.capitalize()}:* {item_title}\n\n"
-                            f"Record owners automatically have complete access and cannot be granted additional permissions. "
-                            f"This request should be denied."
+                            f"*{request_type.capitalize()}:* {item_title}"
                 )
                 # Update the approval card to show it's invalid
                 update_approval_message(

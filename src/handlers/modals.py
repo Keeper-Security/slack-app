@@ -430,12 +430,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 send_error_dm(
                     client=client,
                     user_id=approver_id,
-                    title="Cannot Grant Access - User is Record Owner",
-                    message=f"The requester already owns this {request_type} and has full access to it.\n\n"
+                    title="Access grant failed:",
+                    message=f"The selected user is the current owner of this {request_type} and already has full permissions.\n\n"
                             f"*Request ID:* `{approval_id}`\n"
-                            f"*{request_type.capitalize()}:* {record_title}\n\n"
-                            f"Record owners automatically have complete access and cannot be granted additional permissions. "
-                            f"This request should be denied from the approval channel."
+                            f"*{request_type.capitalize()}:* {record_title}"
                 )
                 # Update the approval card to show it's invalid
                 if "channel_id" in approval_data and "message_ts" in approval_data:
