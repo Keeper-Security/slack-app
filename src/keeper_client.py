@@ -234,7 +234,59 @@ class KeeperClient:
             logger.error(f"Failed to get record {record_uid}: {e}")
             import traceback
             traceback.print_exc()
-        return None
+            return None
+    
+    def get_record_owner(self, record_uid: str) -> Optional[str]:
+        """
+        Get the owner email of a record.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": f"get --format=json {record_uid}"},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                logger.error(f"Failed to submit get command: {response.status_code}")
+                return None
+            
+            result_data = response.json()
+            request_id = result_data.get('request_id')
+            
+            if not request_id:
+                logger.error("No request_id in response")
+                return None
+            
+            # Poll for results
+            final_result = self._poll_for_result(request_id)
+            
+            if not final_result:
+                logger.warning(f"No result for record UID: {record_uid}")
+                return None
+
+            data = final_result.get('data')
+            
+            if not data:
+                logger.warning(f"No data in get result for UID: {record_uid}")
+                return None
+
+            user_permissions = data.get('user_permissions', [])
+            
+            for user_perm in user_permissions:
+                if user_perm.get('owner', False):
+                    owner_email = user_perm.get('username')
+                    logger.info(f"Found record owner: {owner_email}")
+                    return owner_email
+            
+            logger.warning(f"No owner found in user_permissions for record: {record_uid}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get record owner for {record_uid}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def get_folder_by_uid(self, folder_uid: str) -> Optional[KeeperFolder]:
         """
@@ -306,6 +358,18 @@ class KeeperClient:
         Grant access to a record with time limit using share-record command.
         """
         try:
+            #Prevent granting access to record owner
+            record_owner = self.get_record_owner(record_uid)
+
+            if record_owner and user_email.lower() == record_owner.lower():
+                return {
+                    'success': False,
+                    'error': (
+                        f"Cannot grant access to record owner ({user_email}). "
+                        f"The user already owns this record and has access to it."
+                    )
+                }
+            
             if permission == PermissionLevel.CHANGE_OWNER:
                 # Change owner command
                 cmd_parts = ["share-record", record_uid, "-e", user_email, "-a", "owner", "--force"]
