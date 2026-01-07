@@ -44,6 +44,31 @@ def is_valid_uid(identifier: str) -> bool:
     return bool(re.match(uid_pattern, cleaned))
 
 
+def is_record_owner_error(error_message: str) -> bool:
+    """Check if error is due to user being the record owner."""
+    error_lower = error_message.lower()
+    return (
+        "cannot grant access to record owner" in error_lower or
+        "already owns this record" in error_lower
+    )
+
+
+def is_permission_conflict_error(error_message: str) -> bool:
+    """
+    Check if the error is a permission conflict that requires manual revocation.
+    These errors should not update the approval card state.
+    """
+    error_lower = error_message.lower()
+    conflict_indicators = [
+        "already has temporary access",
+        "already has existing permissions",
+        "conflicts with the selected permission level",
+        "first remove the user's existing access",
+        "first revoke the user's existing access"
+    ]
+    return any(indicator in error_lower for indicator in conflict_indicators)
+
+
 def parse_command_text(text: str) -> Tuple[str, str]:
     """
     Parse slash command text into identifier and justification.

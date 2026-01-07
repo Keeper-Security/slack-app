@@ -16,24 +16,8 @@ import json
 from typing import Dict, Any
 from ..models import PermissionLevel
 from ..views import update_approval_message, send_access_granted_dm, send_access_denied_dm
-from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack
+from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack, is_record_owner_error, is_permission_conflict_error
 from ..logger import logger
-
-
-def _is_permission_conflict_error(error_message: str) -> bool:
-    """
-    Check if the error is a permission conflict that requires manual revocation.
-    These errors should not update the approval card state.
-    """
-    error_lower = error_message.lower()
-    conflict_indicators = [
-        "already has temporary access",
-        "already has existing permissions",
-        "conflicts with the selected permission level",
-        "first remove the user's existing access",
-        "first revoke the user's existing access"
-    ]
-    return any(indicator in error_lower for indicator in conflict_indicators)
 
 
 def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
@@ -161,6 +145,64 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             from datetime import datetime
             from ..views import send_share_link_dm
             
+            # Check if this was an invitation (user not in vault)
+            if result.get('invitation_sent'):
+                # Invitation sent - update card with pending status
+                client.chat_update(
+                    channel=body["channel"]["id"],
+                    ts=body["message"]["ts"],
+                    text=f"Invitation sent by <@{approver_id}>",
+                    blocks=[
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Share Invitation Sent",
+                                "emoji": True
+                            }
+                        },
+                        {"type": "divider"},
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Requester:* <@{requester_id}>\n"
+                                        f"*{request_type.capitalize()}:* `{identifier}`\n"
+                                        f"*Permission:* {permission.value}\n\n"
+                                        f"Share invitation has been sent to the user's email.\n"
+                                        f"They must accept the invitation and create a Keeper account to access this {request_type}."
+                            }
+                        },
+                        {"type": "divider"},
+                        {
+                            "type": "context",
+                            "elements": [{
+                                "type": "mrkdwn",
+                                "text": f"Approved by <@{approver_id}> • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            }]
+                        }
+                    ]
+                )
+                
+                # Notify requester that invitation was sent
+                try:
+                    client.chat_postMessage(
+                        channel=requester_id,
+                        text=f"*Share Invitation Sent*\n\n"
+                             f"Your request for *{request_type}* `{identifier}` has been approved!\n\n"
+                             f"However, you don't have a Keeper account yet. A share invitation has been sent to your email.\n\n"
+                             f"*Next Steps:*\n"
+                             f"1. Check your email for the Keeper invitation\n"
+                             f"2. Accept the invitation and create a Keeper account\n"
+                             f"3. The {request_type} will be automatically shared with you\n\n"
+                             f"_Approved by <@{approver_id}>_"
+                    )
+                except Exception as dm_error:
+                    logger.warning(f"Could not send invitation DM to requester: {dm_error}")
+                
+                logger.info(f"Approval {approval_id}: Invitation sent for {request_type} to {requester_id} by {approver_id}")
+                return
+            
             expires_at = result.get('expires_at', 'Never')
             is_permanent = duration_value == "permanent"
             
@@ -249,10 +291,32 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
-            # Approval failed - check if it's a permission conflict
+            # Approval failed - check error type
             error_message = result.get('error', 'Unknown error')
             
-            if _is_permission_conflict_error(error_message):
+            # Check if user is the record owner
+            if is_record_owner_error(error_message):
+                logger.info(f"Approval {approval_id}: User is record owner, sending DM to approver")
+                from ..utils import send_error_dm
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Cannot Grant Access - User is Record Owner",
+                    message=f"The user <@{requester_id}> already owns this {request_type} and has full access to it.\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {item_title}\n\n"
+                            f"Record owners automatically have complete access and cannot be granted additional permissions. "
+                            f"This request should be denied."
+                )
+                # Update the approval card to show it's invalid
+                update_approval_message(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    status="User Already Has Full Access (Owner)",
+                    original_blocks=body["message"]["blocks"]
+                )
+            elif is_permission_conflict_error(error_message):
                 # Permission conflict - don't update card, send DM to approver
                 logger.info(f"Approval {approval_id}: Permission conflict detected, sending DM to approver")
                 from ..utils import send_error_dm
