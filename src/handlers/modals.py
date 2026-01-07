@@ -237,71 +237,24 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         if result.get('success'):
             # Modal already closed via early ack()
             from ..views import send_share_link_dm
-            from datetime import datetime
+            from ..utils import handle_invitation_sent
             
             # Check if this was an invitation (user not in vault)
             if result.get('invitation_sent'):
-                # Update card with invitation status
                 message_ts = approval_data.get("message_ts")
                 channel_id = approval_data.get("channel_id", config.slack.approvals_channel_id)
                 
-                if message_ts:
-                    try:
-                        client.chat_update(
-                            channel=channel_id,
-                            ts=message_ts,
-                            text=f"Invitation sent by <@{approver_id}>",
-                            blocks=[
-                                {
-                                    "type": "header",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Share Invitation Sent",
-                                        "emoji": True
-                                    }
-                                },
-                                {"type": "divider"},
-                                {
-                                    "type": "section",
-                                    "text": {
-                                        "type": "mrkdwn",
-                                        "text": f"*Requester:* <@{requester_id}>\n"
-                                                f"*{request_type.capitalize()}:* `{selected_uid}`\n"
-                                                f"*Permission:* {permission.value}\n\n"
-                                                f"Share invitation has been sent to the user's email.\n"
-                                                f"They must accept the invitation and create a Keeper account to access this {request_type}."
-                                    }
-                                },
-                                {"type": "divider"},
-                                {
-                                    "type": "context",
-                                    "elements": [{
-                                        "type": "mrkdwn",
-                                        "text": f"Approved by <@{approver_id}> • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                                    }]
-                                }
-                            ]
-                        )
-                    except Exception as update_error:
-                        logger.error(f"Failed to update approval card for invitation: {update_error}")
-                
-                # Notify requester that invitation was sent
-                try:
-                    client.chat_postMessage(
-                        channel=requester_id,
-                        text=f"*Share Invitation Sent*\n\n"
-                             f"Your request for *{request_type}* `{selected_uid}` has been approved!\n\n"
-                             f"However, you don't have a Keeper account yet. A share invitation has been sent to your email.\n\n"
-                             f"*Next Steps:*\n"
-                             f"1. Check your email for the Keeper invitation\n"
-                             f"2. Accept the invitation and create a Keeper account\n"
-                             f"3. The {request_type} will be automatically shared with you\n\n"
-                             f"_Approved by <@{approver_id}>_"
-                    )
-                except Exception as dm_error:
-                    logger.warning(f"Could not send invitation DM to requester: {dm_error}")
-                
-                logger.info(f"Approval {approval_id}: Invitation sent for {request_type} via search modal by {approver_id}")
+                handle_invitation_sent(
+                    client=client,
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    approver_id=approver_id,
+                    requester_id=requester_id,
+                    request_type=request_type,
+                    identifier=selected_uid,
+                    permission_value=permission.value,
+                    approval_id=approval_id
+                )
                 return
             
             # Send appropriate DM based on request type

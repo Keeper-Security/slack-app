@@ -431,3 +431,90 @@ def send_success_dm(client, user_id: str, title: str, message: str, **kwargs) ->
             formatted_text += f"*{field_name}:* {value}\n"
     
     return send_dm(client, user_id, formatted_text)
+
+
+def handle_invitation_sent(
+    client,
+    channel_id: str,
+    message_ts: str,
+    approver_id: str,
+    requester_id: str,
+    request_type: str,
+    identifier: str,
+    permission_value: str,
+    approval_id: str
+) -> None:
+    """
+    Handle invitation sent scenario - update approval card and notify requester.
+    
+    Args:
+        client: Slack WebClient instance
+        channel_id: Channel ID where approval card is posted
+        message_ts: Message timestamp of the approval card
+        approver_id: Slack user ID of the approver
+        requester_id: Slack user ID of the requester
+        request_type: Type of request (record/folder)
+        identifier: UID of the record/folder
+        permission_value: Permission level granted
+        approval_id: Approval request ID
+    """
+    from datetime import datetime
+    
+    # Update approval card
+    if message_ts and channel_id:
+        try:
+            client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=f"Invitation sent by <@{approver_id}>",
+                blocks=[
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Share Invitation Sent",
+                            "emoji": True
+                        }
+                    },
+                    {"type": "divider"},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Requester:* <@{requester_id}>\n"
+                                    f"*{request_type.capitalize()}:* `{identifier}`\n"
+                                    f"*Permission:* {permission_value}\n\n"
+                                    f"Share invitation has been sent to the user's email.\n"
+                                    f"They must accept the invitation and create a Keeper account to access this {request_type}."
+                        }
+                    },
+                    {"type": "divider"},
+                    {
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": f"Approved by <@{approver_id}> • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        }]
+                    }
+                ]
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to update approval card for invitation: {e}")
+    
+    # Notify requester
+    try:
+        client.chat_postMessage(
+            channel=requester_id,
+            text=f"*Share Invitation Sent*\n\n"
+                 f"Your request for *{request_type}* `{identifier}` has been approved!\n\n"
+                 f"However, you don't have a Keeper account yet. A share invitation has been sent to your email.\n\n"
+                 f"*Next Steps:*\n"
+                 f"1. Check your email for the Keeper invitation\n"
+                 f"2. Accept the invitation and create a Keeper account\n"
+                 f"3. The {request_type} will be automatically shared with you\n\n"
+                 f"_Approved by <@{approver_id}>_"
+        )
+    except Exception as e:
+        print(f"[WARN] Could not send invitation DM to requester: {e}")
+    
+    print(f"[INFO] Approval {approval_id}: Invitation sent for {request_type} to {requester_id} by {approver_id}")

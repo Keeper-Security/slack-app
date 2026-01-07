@@ -144,63 +144,21 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             # Update approval message with beautiful formatting
             from datetime import datetime
             from ..views import send_share_link_dm
+            from ..utils import handle_invitation_sent
             
             # Check if this was an invitation (user not in vault)
             if result.get('invitation_sent'):
-                # Invitation sent - update card with pending status
-                client.chat_update(
-                    channel=body["channel"]["id"],
-                    ts=body["message"]["ts"],
-                    text=f"Invitation sent by <@{approver_id}>",
-                    blocks=[
-                        {
-                            "type": "header",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Share Invitation Sent",
-                                "emoji": True
-                            }
-                        },
-                        {"type": "divider"},
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Requester:* <@{requester_id}>\n"
-                                        f"*{request_type.capitalize()}:* `{identifier}`\n"
-                                        f"*Permission:* {permission.value}\n\n"
-                                        f"Share invitation has been sent to the user's email.\n"
-                                        f"They must accept the invitation and create a Keeper account to access this {request_type}."
-                            }
-                        },
-                        {"type": "divider"},
-                        {
-                            "type": "context",
-                            "elements": [{
-                                "type": "mrkdwn",
-                                "text": f"Approved by <@{approver_id}> • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                            }]
-                        }
-                    ]
+                handle_invitation_sent(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    approver_id=approver_id,
+                    requester_id=requester_id,
+                    request_type=request_type,
+                    identifier=identifier,
+                    permission_value=permission.value,
+                    approval_id=approval_id
                 )
-                
-                # Notify requester that invitation was sent
-                try:
-                    client.chat_postMessage(
-                        channel=requester_id,
-                        text=f"*Share Invitation Sent*\n\n"
-                             f"Your request for *{request_type}* `{identifier}` has been approved!\n\n"
-                             f"However, you don't have a Keeper account yet. A share invitation has been sent to your email.\n\n"
-                             f"*Next Steps:*\n"
-                             f"1. Check your email for the Keeper invitation\n"
-                             f"2. Accept the invitation and create a Keeper account\n"
-                             f"3. The {request_type} will be automatically shared with you\n\n"
-                             f"_Approved by <@{approver_id}>_"
-                    )
-                except Exception as dm_error:
-                    logger.warning(f"Could not send invitation DM to requester: {dm_error}")
-                
-                logger.info(f"Approval {approval_id}: Invitation sent for {request_type} to {requester_id} by {approver_id}")
                 return
             
             expires_at = result.get('expires_at', 'Never')
