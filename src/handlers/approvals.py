@@ -16,24 +16,8 @@ import json
 from typing import Dict, Any
 from ..models import PermissionLevel
 from ..views import update_approval_message, send_access_granted_dm, send_access_denied_dm
-from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack
+from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack, is_record_owner_error, is_permission_conflict_error
 from ..logger import logger
-
-
-def _is_permission_conflict_error(error_message: str) -> bool:
-    """
-    Check if the error is a permission conflict that requires manual revocation.
-    These errors should not update the approval card state.
-    """
-    error_lower = error_message.lower()
-    conflict_indicators = [
-        "already has temporary access",
-        "already has existing permissions",
-        "conflicts with the selected permission level",
-        "first remove the user's existing access",
-        "first revoke the user's existing access"
-    ]
-    return any(indicator in error_lower for indicator in conflict_indicators)
 
 
 def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
@@ -160,6 +144,22 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             # Update approval message with beautiful formatting
             from datetime import datetime
             from ..views import send_share_link_dm
+            from ..utils import handle_invitation_sent
+            
+            # Check if this was an invitation (user not in vault)
+            if result.get('invitation_sent'):
+                handle_invitation_sent(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    approver_id=approver_id,
+                    requester_id=requester_id,
+                    request_type=request_type,
+                    identifier=identifier,
+                    permission_value=permission.value,
+                    approval_id=approval_id
+                )
+                return
             
             expires_at = result.get('expires_at', 'Never')
             is_permanent = duration_value == "permanent"
@@ -249,10 +249,30 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
-            # Approval failed - check if it's a permission conflict
+            # Approval failed - check error type
             error_message = result.get('error', 'Unknown error')
             
-            if _is_permission_conflict_error(error_message):
+            # Check if user is the record owner
+            if is_record_owner_error(error_message):
+                logger.info(f"Approval {approval_id}: User is record owner, sending DM to approver")
+                from ..utils import send_error_dm
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Access grant failed:",
+                    message=f"The selected user is the current owner of this {request_type} and already has full permissions.\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {item_title}"
+                )
+                # Update the approval card to show it's invalid
+                update_approval_message(
+                    client=client,
+                    channel_id=body["channel"]["id"],
+                    message_ts=body["message"]["ts"],
+                    status="User Already Has Full Access (Owner)",
+                    original_blocks=body["message"]["blocks"]
+                )
+            elif is_permission_conflict_error(error_message):
                 # Permission conflict - don't update card, send DM to approver
                 logger.info(f"Approval {approval_id}: Permission conflict detected, sending DM to approver")
                 from ..utils import send_error_dm

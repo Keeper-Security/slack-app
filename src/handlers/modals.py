@@ -20,25 +20,10 @@ from ..views import update_approval_message, send_access_granted_dm, post_approv
 from ..utils import (
     parse_duration_to_seconds, format_duration, get_user_email_from_slack,
     generate_approval_id, is_valid_uid, sanitize_user_input,
-    MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH
+    MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
+    is_record_owner_error, is_permission_conflict_error
 )
 from ..logger import logger
-
-
-def _is_permission_conflict_error(error_message: str) -> bool:
-    """
-    Check if the error is a permission conflict that requires manual revocation.
-    These errors should not update the approval card state.
-    """
-    error_lower = error_message.lower()
-    conflict_indicators = [
-        "already has temporary access",
-        "already has existing permissions",
-        "conflicts with the selected permission level",
-        "first remove the user's existing access",
-        "first revoke the user's existing access"
-    ]
-    return any(indicator in error_lower for indicator in conflict_indicators)
 
 
 def _send_ephemeral_response(response_url: str, text: str) -> bool:
@@ -252,6 +237,25 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         if result.get('success'):
             # Modal already closed via early ack()
             from ..views import send_share_link_dm
+            from ..utils import handle_invitation_sent
+            
+            # Check if this was an invitation (user not in vault)
+            if result.get('invitation_sent'):
+                message_ts = approval_data.get("message_ts")
+                channel_id = approval_data.get("channel_id", config.slack.approvals_channel_id)
+                
+                handle_invitation_sent(
+                    client=client,
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    approver_id=approver_id,
+                    requester_id=requester_id,
+                    request_type=request_type,
+                    identifier=selected_uid,
+                    permission_value=permission.value,
+                    approval_id=approval_id
+                )
+                return
             
             # Send appropriate DM based on request type
             if request_type == "one_time_share":
@@ -372,8 +376,33 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             error_msg = result.get('error', 'Unknown error')
             logger.error(f"Failed to grant access: {error_msg}")
             
+            # Check if user is the record owner
+            if is_record_owner_error(error_msg):
+                logger.info(f"User is record owner for approval {approval_id}, sending DM to approver")
+                from ..utils import send_error_dm
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title="Access grant failed:",
+                    message=f"The selected user is the current owner of this {request_type} and already has full permissions.\n\n"
+                            f"*Request ID:* `{approval_id}`\n"
+                            f"*{request_type.capitalize()}:* {record_title}"
+                )
+                # Update the approval card to show it's invalid
+                if "channel_id" in approval_data and "message_ts" in approval_data:
+                    try:
+                        from ..views import update_approval_message
+                        update_approval_message(
+                            client=client,
+                            channel_id=approval_data["channel_id"],
+                            message_ts=approval_data["message_ts"],
+                            status="User Already Has Full Access (Owner)",
+                            original_blocks=[]
+                        )
+                    except Exception as update_error:
+                        logger.debug(f"Could not update approval card: {update_error}")
             # Check if this is a permission conflict error
-            if _is_permission_conflict_error(error_msg):
+            elif is_permission_conflict_error(error_msg):
                 # Permission conflict - don't update card, send DM to approver
                 logger.info(f"Permission conflict detected for approval {approval_id}, sending DM to approver")
                 from ..utils import send_error_dm

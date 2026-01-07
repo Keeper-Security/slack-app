@@ -313,21 +313,21 @@ def build_search_modal(
     metadata['query'] = query
     
     # Cache results as serializable dicts (KeeperRecord/KeeperFolder objects can't be JSON serialized)
+    # Only cache essential fields and limit to 10 to stay under Slack's private_metadata 3000 char limit
     if results:
         # Check if results are already dicts (from cached_results) or objects
         if isinstance(results[0], dict):
-            # Already dicts, use as-is
-            metadata['cached_results'] = results
+            metadata['cached_results'] = [
+                {'uid': r.get('uid', ''), 'title': r.get('title', 'Untitled')}
+                for r in results[:10]
+            ]
         else:
-            # Convert objects to dicts
             metadata['cached_results'] = [
                 {
                     'uid': r.uid,
-                    'title': r.title if hasattr(r, 'title') else r.name,
-                    'record_type': r.record_type if hasattr(r, 'record_type') else getattr(r, 'folder_type', 'unknown'),
-                    'notes': getattr(r, 'notes', '') or ''
+                    'title': r.title if hasattr(r, 'title') else r.name
                 }
-                for r in results
+                for r in results[:10]
             ]
     else:
         metadata['cached_results'] = []
@@ -351,12 +351,15 @@ def build_search_modal(
     ]
     
     # Build action buttons (Refine Search + optionally Create New Record)
+    # Use slim metadata for button values
+    button_metadata = {k: v for k, v in metadata.items() if k != 'cached_results'}
+    
     action_buttons = [
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": "🔍 Refine Search"},
+            "text": {"type": "plain_text", "text": "Refine Search"},
             "action_id": "refine_search_action",
-            "value": json.dumps(metadata)
+            "value": json.dumps(button_metadata)
         }
     ]
     
@@ -369,7 +372,7 @@ def build_search_modal(
             "text": {"type": "plain_text", "text": "Create New Record"},
             "style": "primary",
             "action_id": "create_new_record_action",
-            "value": json.dumps(metadata)
+            "value": json.dumps(button_metadata)
         })
     
     # Add the combined action block
