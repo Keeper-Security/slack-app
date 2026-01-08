@@ -921,6 +921,33 @@ def post_pedm_approval_request(
         print(f"[WARN] Could not parse expiration time: {e}")
         expires_str = f"{request.expire_in} minutes from creation"
     
+    # function to truncate long text
+    def truncate_text(text: str, max_length: int = 150) -> str:
+        """Truncate text if too long, adding ellipsis."""
+        if not text:
+            return text
+        if len(text) <= max_length:
+            return text
+        return text[:max_length - 3] + "..."
+    
+    # Build command details based on approval type
+    if request.approval_type == "CommandLine":
+        # For CommandLine
+        command_details_fields = [
+            {"type": "mrkdwn", "text": f"*Executable:*\n`{truncate_text(request.file_name)}`"},
+            {"type": "mrkdwn", "text": f"*Path:*\n`{truncate_text(request.file_path)}`"},
+            {"type": "mrkdwn", "text": f"*Command:*\n`{truncate_text(request.command)}`"},
+            {"type": "mrkdwn", "text": f"*Description:*\n{truncate_text(request.description)}"}
+        ]
+    else:  # PrivilegeElevation
+        full_path = request.command if request.command else f"{request.file_path}\\{request.file_name}" if '\\' in request.file_path else f"{request.file_path}/{request.file_name}"
+        command_details_fields = [
+            {"type": "mrkdwn", "text": f"*Executable:*\n`{truncate_text(request.file_name)}`"},
+            {"type": "mrkdwn", "text": f"*Path:*\n`{truncate_text(request.file_path)}`"},
+            {"type": "mrkdwn", "text": f"*Full Path:*\n`{truncate_text(full_path)}`"},
+            {"type": "mrkdwn", "text": f"*Description:*\n{truncate_text(request.description)}"}
+        ]
+    
     # Build approval card
     blocks = [
         {
@@ -941,14 +968,7 @@ def post_pedm_approval_request(
         {"type": "divider"},
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Command Details*\n\n"
-                        f"*Executable:* `{request.file_name}`\n"
-                        f"*Path:* `{request.file_path}`\n"
-                        f"*Command:* `{request.command}`\n"
-                        f"*Description:* {request.description}"
-            }
+            "fields": command_details_fields
         },
         {
             "type": "section",
