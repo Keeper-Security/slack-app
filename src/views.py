@@ -1101,7 +1101,7 @@ def build_request_modal(
             "header": "*Request access to a record*\n\nFill in the details below to submit your request for approval.",
             "block_id": "record_identifier",
             "label": "Record UID or Description",
-            "placeholder": 'e.g., kR3cF9Xm2Lp8NqT1uV6w or "Production Database"'
+            "placeholder": 'Record UID, Title or Description'
         },
         "folder": {
             "callback_id": "request_folder_modal_submit",
@@ -1109,7 +1109,7 @@ def build_request_modal(
             "header": "*Request access to a folder*\n\nFill in the details below to submit your request for approval.",
             "block_id": "folder_identifier",
             "label": "Folder UID or Description",
-            "placeholder": 'Folder UID or Description'
+            "placeholder": 'Folder UID, Folder Name or Description'
         },
         "one_time_share": {
             "callback_id": "one_time_share_modal_submit",
