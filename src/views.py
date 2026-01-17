@@ -609,17 +609,17 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                     "type": "plain_text_input",
                     "action_id": "title_input",
                     "initial_value": original_query,
-                    "placeholder": {"type": "plain_text", "text": "e.g., Production Database"}
+                    "placeholder": {"type": "plain_text", "text": "Title"}
                 }
             },
             {
                 "type": "input",
                 "block_id": "record_login",
-                "label": {"type": "plain_text", "text": "Login / Username (Required)"},
+                "label": {"type": "plain_text", "text": "Login (Required)"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "login_input",
-                    "placeholder": {"type": "plain_text", "text": "e.g., admin@company.com"}
+                    "placeholder": {"type": "plain_text", "text": "Email or Username"}
                 }
             },
             {
@@ -639,7 +639,7 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "url_input",
-                    "placeholder": {"type": "plain_text", "text": "e.g., https://app.example.com"}
+                    "placeholder": {"type": "plain_text", "text": "https://"}
                 },
                 "optional": True
             },
@@ -651,7 +651,7 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                     "type": "plain_text_input",
                     "action_id": "notes_input",
                     "multiline": True,
-                    "placeholder": {"type": "plain_text", "text": "Additional information about this record"}
+                    "placeholder": {"type": "plain_text", "text": "Notes"}
                 },
                 "optional": True
             },
@@ -1109,7 +1109,7 @@ def build_request_modal(
             "header": "*Request access to a folder*\n\nFill in the details below to submit your request for approval.",
             "block_id": "folder_identifier",
             "label": "Folder UID or Description",
-            "placeholder": 'e.g., kF8zQ2Nm5Wx9PtR3sY7a or "Staging Team Folder"'
+            "placeholder": 'Folder UID or Description'
         },
         "one_time_share": {
             "callback_id": "one_time_share_modal_submit",
@@ -1117,7 +1117,7 @@ def build_request_modal(
             "header": "*Request a one-time share link*\n\nFill in the details below to submit your request for approval.",
             "block_id": "record_identifier",
             "label": "Record UID or Description",
-            "placeholder": 'e.g., kR3cF9Xm2Lp8NqT1uV6w or "AWS Production Password"'
+            "placeholder": 'Record UID or Description'
         }
     }
     
@@ -1156,7 +1156,7 @@ def build_request_modal(
                     "type": "plain_text_input",
                     "action_id": "justification_input",
                     "multiline": True,
-                    "placeholder": {"type": "plain_text", "text": "e.g., JIRA-1234 Justification message"}
+                    "placeholder": {"type": "plain_text", "text": "Justification or Ticket Number"}
                 }
             }
         ]
