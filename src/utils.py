@@ -78,35 +78,35 @@ def parse_command_text(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
     
+    identifier = ""
+    justification = ""
+    
     if text.startswith('"'):
         # Find closing quote
         end_quote = text.find('"', 1)
         if end_quote != -1:
             identifier = text[1:end_quote]
             justification = text[end_quote + 1:].strip()
-            return identifier, justification
-    
-    # Check for quoted identifier (single quotes)
-    if text.startswith("'"):
-        # Find closing quote
+    elif text.startswith("'"):
+        # Check for quoted identifier (single quotes)
         end_quote = text.find("'", 1)
         if end_quote != -1:
             identifier = text[1:end_quote]
             justification = text[end_quote + 1:].strip()
-            return identifier, justification
-    
-    # No quotes - split on first whitespace
-    parts = text.split(None, 1)
-    identifier = parts[0] if parts else ""
-    justification = parts[1] if len(parts) > 1 else ""
+    else:
+        # No quotes - split on first whitespace
+        parts = text.split(None, 1)
+        identifier = parts[0] if parts else ""
+        justification = parts[1] if len(parts) > 1 else ""
     
     # Clean Slack markdown formatting from identifier (*, _, ~, `)
     # This prevents issues where Slack auto-formats UIDs
+    # Apply cleaning in ALL cases (quoted and unquoted) for consistent behavior
     if identifier:
         cleaned_identifier = identifier.strip('*_~`')
         if cleaned_identifier != identifier:
             print(f"[INFO] Cleaned identifier: '{identifier}' → '{cleaned_identifier}'")
-            identifier = cleaned_identifier
+        identifier = cleaned_identifier
     
     return identifier, justification
 
@@ -149,10 +149,19 @@ def sanitize_slack_text(text: str) -> str:
 
 def sanitize_hyperlinks(text: str) -> str:
     """
-    Sanitize hyperlinks in text.
-    URLs are kept as-is; previews are blocked via unfurl_links=False in chat_postMessage.
+    Sanitize hyperlinks in text to prevent URL injection attacks.
+    Removes colons and forward slashes that could create clickable URLs in Slack.
     """
-    return text
+    if not text:
+        return text
+    
+    # Remove colons and forward slashes to prevent URL injection
+    # These characters can create clickable hyperlinks in Slack
+    sanitized = text.replace(':', '')
+    sanitized = sanitized.replace('/', '')
+    sanitized = sanitized.replace('//', '')  # Remove double slashes
+    
+    return sanitized
 
 # Maximum allowed length for user input fields
 MAX_JUSTIFICATION_LENGTH = 500
@@ -161,8 +170,8 @@ MAX_IDENTIFIER_LENGTH = 200
 
 def sanitize_command_input(text: str) -> str:
     """
-    Sanitize user input to prevent command injection.
-    Removes shell special characters that could be used for injection attacks.
+    Sanitize user input to prevent command injection and URL injection.
+    Removes shell special characters and URL characters that could be used for injection attacks.
     Note: Quotes are kept as-is for display; shell escaping is handled at command execution.
     """
     if not text:
@@ -170,7 +179,7 @@ def sanitize_command_input(text: str) -> str:
     
     # Characters that could be used for injection
     dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '[', ']', 
-                       '!', '\\', '\n', '\r', '\x00']
+                       '!', '\\', '\n', '\r', '\x00', ':', '/']
     
     sanitized = text
     for char in dangerous_chars:

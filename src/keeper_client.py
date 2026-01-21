@@ -38,7 +38,7 @@ class KeeperClient:
         """
         Initialize Keeper client.
         """
-        self.base_url = config.service_url.rstrip('/')
+        self.base_url = config.service_url
         self.api_key = config.api_key
         
         # Create session for connection pooling
@@ -65,7 +65,7 @@ class KeeperClient:
         Update the client credentials dynamically without restart the slack app server.
         """
         # Update base URL
-        self.base_url = service_url.rstrip('/')
+        self.base_url = service_url
         
         # Update API key and session headers
         if api_key:
@@ -767,7 +767,9 @@ class KeeperClient:
                     if status == 'success':
                         return result
                     elif status == 'error':
-                        logger.error(f"Command failed: {result.get('message', 'Unknown error')}")
+                        # Check both 'error' and 'message' fields
+                        error_msg = result.get('error') or result.get('message', 'Unknown error')
+                        logger.error(f"Command failed: {error_msg}")
                         return result
                     elif status in ['pending', 'running']:
                         # Still processing, continue polling
@@ -845,6 +847,11 @@ class KeeperClient:
                             record_type = part.replace('Type: ', '').strip()
                         elif part.startswith('Description: '):
                             notes = part.replace('Description: ', '').strip()
+                
+                # Skip record type that contains "pam"
+                if 'pam' in record_type.lower():
+                    logger.debug(f"Skipping record {uid} with PAM type: {record_type}")
+                    continue
                 
                 if uid and title:
                     records.append(KeeperRecord(
@@ -1310,7 +1317,19 @@ class KeeperClient:
             if result_data and result_data.get('status') == 'success':
                 return {'success': True}
             else:
-                error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                error = result_data.get('error') if result_data else None
+                if not error:
+                    error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                
+                # Check if this is the "already processed" error
+                if error and ("does not exist or cannot be modified" in error or 
+                              "Approval request does not exist" in error):
+                    return {
+                        'success': False, 
+                        'error': error,
+                        'already_processed': True
+                    }
+                
                 return {'success': False, 'error': error}
                 
         except Exception as e:
@@ -1342,7 +1361,19 @@ class KeeperClient:
             if result_data and result_data.get('status') == 'success':
                 return {'success': True}
             else:
-                error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                error = result_data.get('error') if result_data else None
+                if not error:
+                    error = result_data.get('message', 'Unknown error') if result_data else 'Timeout'
+                
+                # Check if this is the "already processed" error
+                if error and ("does not exist or cannot be modified" in error or 
+                              "Approval request does not exist" in error):
+                    return {
+                        'success': False, 
+                        'error': error,
+                        'already_processed': True
+                    }
+                
                 return {'success': False, 'error': error}
                 
         except Exception as e:

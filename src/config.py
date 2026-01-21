@@ -74,8 +74,7 @@ class Config:
     """
     Application configuration manager.
     
-    Loads configuration from YAML file and environment variables.
-    Environment variables take precedence over file configuration.
+    Loads configuration from YAML file (for local development) and KSM records (for Docker/production).
     """
     
     def __init__(self, config_path: Optional[str] = None):
@@ -84,15 +83,15 @@ class Config:
         """
         self._data = {}
         
-        # Try to load from file
+        # Try to load from file (for local development)
         if config_path and os.path.exists(config_path):
             self._load_from_file(config_path)
         else:
             # Try default locations
             self._try_default_locations()
         
-        # Override with environment variables
-        self._load_from_env()
+        # Try to load from KSM (for Docker/production)
+        self._load_from_ksm()
         
         # Validate required fields
         self._validate()
@@ -120,31 +119,77 @@ class Config:
                 self._load_from_file(path)
                 break
     
-    def _load_from_env(self):
-        """Load and override configuration from environment variables."""
-        env_mappings = {
-            'SLACK_APP_TOKEN': ('slack', 'app_token'),
-            'SLACK_BOT_TOKEN': ('slack', 'bot_token'),
-            'SLACK_SIGNING_SECRET': ('slack', 'signing_secret'),
-            'APPROVALS_CHANNEL_ID': ('slack', 'approvals_channel_id'),
-            'KEEPER_SERVICE_URL': ('keeper', 'service_url'),
-            'KEEPER_API_KEY': ('keeper', 'api_key'),
-            'PEDM_ENABLED': ('pedm', 'enabled'),
-            'PEDM_POLLING_INTERVAL_IN_SEC': ('pedm', 'polling_interval_in_sec'),
-            'DEVICE_APPROVAL_ENABLED': ('device_approval', 'enabled'),
-            'DEVICE_APPROVAL_POLLING_INTERVAL_IN_SEC': ('device_approval', 'polling_interval_in_sec'),        }
+    def _load_from_ksm(self):
+        """Load configuration from KSM records."""
+
+        ksm_config = None
+        commander_record = None
+        slack_record = None
         
-        for env_var, (section, key) in env_mappings.items():
-            value = os.environ.get(env_var)
-            if value:
+        # Check for Docker configs (mounted files)
+        docker_config_path = '/run/secrets/ksm-config'
+        docker_commander_path = '/run/secrets/commander-record'
+        docker_slack_path = '/run/secrets/slack-record'
+        
+        if os.path.exists(docker_config_path):
+            try:
+                with open(docker_config_path, 'r') as f:
+                    ksm_config = f.read().strip()
+                logger.debug("Read KSM config from Docker config file")
+            except Exception as e:
+                logger.warning(f"Failed to read KSM config from Docker config: {e}")
+        
+        if os.path.exists(docker_commander_path):
+            try:
+                with open(docker_commander_path, 'r') as f:
+                    commander_record = f.read().strip()
+                logger.debug("Read commander record from Docker config file")
+            except Exception as e:
+                logger.warning(f"Failed to read commander record from Docker config: {e}")
+        
+        if os.path.exists(docker_slack_path):
+            try:
+                with open(docker_slack_path, 'r') as f:
+                    slack_record = f.read().strip()
+                logger.debug("Read slack record from Docker config file")
+            except Exception as e:
+                logger.warning(f"Failed to read slack record from Docker config: {e}")
+        
+        # Fallback to environment variables if Docker configs not found
+        if not ksm_config:
+            ksm_config = os.environ.get('KSM_CONFIG')
+        if not commander_record:
+            commander_record = os.environ.get('COMMANDER_RECORD', 'CSMD config')  # Default title
+        if not slack_record:
+            slack_record = os.environ.get('SLACK_RECORD', 'CSMD slack config')  # Default title
+        
+        # If KSM config is not provided, skip KSM loading (local development mode)
+        if not ksm_config:
+            logger.debug("KSM config not found, skipping KSM credential fetch (local development mode)")
+            return
+        
+        if not commander_record and not slack_record:
+            logger.debug("No KSM record titles provided, skipping KSM credential fetch")
+            return
+        
+        try:
+            from .ksm_utils import fetch_credentials_from_ksm
+            ksm_data = fetch_credentials_from_ksm(
+                ksm_config=ksm_config,
+                commander_record_title=commander_record,
+                slack_record_title=slack_record
+            )
+            
+            # Merge KSM data into config (KSM takes precedence over file)
+            for section, values in ksm_data.items():
                 if section not in self._data:
                     self._data[section] = {}
-                # Convert boolean and integer values
-                if key == 'enabled':
-                    value = value.lower() in ('true', '1', 'yes')
-                elif key == 'polling_interval_in_sec':
-                    value = int(value)
-                self._data[section][key] = value
+                self._data[section].update(values)
+                
+            logger.info("Loaded configuration from KSM records")
+        except Exception as e:
+            logger.warning(f"Failed to load from KSM: {e}")
+
     
     def _validate(self):
         """Validate required configuration fields."""
@@ -165,8 +210,9 @@ class Config:
         if missing:
             raise ValueError(
                 f"Missing required configuration: {', '.join(missing)}\n\n"
-                f"Set these via environment variables or in slack_config.yaml\n"
-                f"See SLACK_SETUP.md for detailed instructions."
+                f"For local development: Set these in slack_config.yaml\n"
+                f"For Docker/production: Set KSM_CONFIG, COMMANDER_RECORD, and SLACK_RECORD environment variables\n"
+                f"See slack Gitbook for detailed instructions."
             )
     
     @property
@@ -210,8 +256,8 @@ class Config:
                 api_key=keeper_data.get('api_key')
             )
         
-        # Default fallback - configure via config file or App Home
-        logger.info("No Keeper config found. Configure via slack_config.yaml or environment variables.")
+        # Default fallback - configure via config file or KSM
+        logger.info("No Keeper config found. Configure via  KSM records (Docker) slack_config.yaml (local) or.")
         return KeeperConfig(
             service_url='http://localhost:8080',
             api_key=None

@@ -61,6 +61,9 @@ def post_approval_request(
     # Sanitize justification to prevent malicious hyperlinks
     safe_justification = sanitize_hyperlinks(justification)
     
+    # Sanitize identifier/UID to prevent URL injection
+    safe_identifier = sanitize_hyperlinks(identifier)
+    
     blocks = [
         {
             "type": "header",
@@ -71,7 +74,7 @@ def post_approval_request(
             "fields": [
                 {"type": "mrkdwn", "text": f"*Requester:*\n<@{requester_id}>"},
                 {"type": "mrkdwn", "text": f"*Request ID:*\n`{approval_id}`"},
-                {"type": "mrkdwn", "text": f"*{item_type}:*\n`{identifier}`"},
+                {"type": "mrkdwn", "text": f"*{item_type}:*\n`{safe_identifier}`"},
                 {"type": "mrkdwn", "text": f"*Justification:*\n{safe_justification}"},
                 {"type": "mrkdwn", "text": f"*Requested:*\n{format_timestamp()}"}
             ]
@@ -933,14 +936,17 @@ def post_pedm_approval_request(
     # Build command details based on approval type
     if request.approval_type == "CommandLine":
         # For CommandLine
-        command_details_fields = [
-            {"type": "mrkdwn", "text": f"*Executable:*\n`{truncate_text(request.file_name)}`"},
-            {"type": "mrkdwn", "text": f"*Path:*\n`{truncate_text(request.file_path)}`"},
-            {"type": "mrkdwn", "text": f"*Command:*\n`{truncate_text(request.command)}`"},
-            {"type": "mrkdwn", "text": f"*Description:*\n{truncate_text(request.description)}"}
-        ]
+        command_details_text = f"*Executable:* `{request.file_name}`\n"
+        command_details_text += f"*Path:* `{request.file_path}`\n"
+        command_details_text += f"*Command:* `{request.command}`\n"
+        command_details_text += f"*Description:* {request.description}"
+        command_details_fields = None  # Use text block instead
     else:  # PrivilegeElevation
-        full_path = request.command if request.command else f"{request.file_path}\\{request.file_name}" if '\\' in request.file_path else f"{request.file_path}/{request.file_name}"
+        if request.file_path and request.file_name:
+            path_separator = '\\' if '\\' in request.file_path or ':' in request.file_path else '/'
+            full_path = f"{request.file_path}{path_separator}{request.file_name}"
+        else:
+            full_path = request.command if request.command else "Unknown"
         command_details_fields = [
             {"type": "mrkdwn", "text": f"*Executable:*\n`{truncate_text(request.file_name)}`"},
             {"type": "mrkdwn", "text": f"*Path:*\n`{truncate_text(request.file_path)}`"},
@@ -968,15 +974,40 @@ def post_pedm_approval_request(
         {"type": "divider"},
         {
             "type": "section",
-            "fields": command_details_fields
-        },
-        {
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Command Details*"
+            }
+        }
+    ]
+
+    if command_details_fields is None:
+        blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Justification:*\n{request.justification or '_No justification provided_'}"
+                "text": command_details_text
             }
-        },
+        })
+    else:
+        # PrivilegeElevation type(grid layout)
+        blocks.append({
+            "type": "section",
+            "fields": command_details_fields
+        })
+    
+    # Add justification (sanitized to prevent URL injection)
+    safe_justification = sanitize_hyperlinks(request.justification) if request.justification else '_No justification provided_'
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"*Justification:*\n{safe_justification}"
+        }
+    })
+    
+    # Continue building blocks
+    blocks.extend([
         {"type": "divider"},
         {
             "type": "actions",
@@ -997,7 +1028,7 @@ def post_pedm_approval_request(
                 }
             ]
         }
-    ]
+    ])
     
     try:
         client.chat_postMessage(

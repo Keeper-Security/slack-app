@@ -1,22 +1,40 @@
-version: '3.8'
 
 services:
-  keeper-slack-app:
+  commander:
+    container_name: keeper-service
+    ports:
+      - port:port
+    image: keeper/commander:latest
+    command: service-create -p 8900 -c 'search, share-record, share-folder, record-add, one-time-share, pedm, device-approve, get' -f json -q y -ur J_ZQJg4sMBsF0GYsuCtDHA --ksm-config eyJob3N0bmFtZSI6ICJxYS5rZWVwZXJzZWN1cml0eS5jb20iLCAiY2xpZW50SWQiOiAiK0pMQ0JyWlJhNUZCL3d3YUQ0Y1Z6bVpHUzc1d0JIRENCN0lyeHJ5Vk5ZSEFQZ2pQV1ZHUWszNmlCSTRFcU1RSDcvWWJiTGMxVUh6R3JFaHdOLzlZcXc9PSIsICJwcml2YXRlS2V5IjogIk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ2FMY1hjUWVJN2p2a1RtT3dCQXZheXZWcHkrQ0k4M05GQ2dPL1p3eDBiU2FoUkFOQ0FBUkVqRGd0U3hKek9PWGkvcHpSdW1XMVJ3NjdyY1p1VVFuUVJBUWlYdWtQTkMvOW5NMXBIVC9vbkxzVkk2WjBGZmFrRWhCSk1MajFhZWxkK0ZQa3JEaXIiLCAic2VydmVyUHVibGljS2V5SWQiOiAiOSIsICJhcHBLZXkiOiAiRlFIemt2Tkcvb2VMcm5rU2diRWZwUlJKU01MNDlhYXBzc3RUTUlIL0dmQT0iLCAiYXBwT3duZXJQdWJsaWNLZXkiOiAiQk9sMlp5TG9CUWdVZGRTenZrK1YzaDkvcXFWQjNqeTh6VUtrU3JleVlVQzZJdk1OR2l5d01oNWgyVTlGTVlLQ3laL3VJMDZUM2FqY0dIaDF0Z3F2UFE0PSJ9 --record J_ZQJg4sMBsF0GYsuCtDHA
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:port/health', timeout=2).status == 200 else 1)"
+      interval: 60s
+      timeout: 3s
+      start_period: 10s
+      retries: 30
+    restart: unless-stopped
+
+  slack-app:
+    container_name: keeper-slack-app
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: keeper-slack-app
+    image: keeper/slack-app:latest
+    environment:
+      # KSM Configuration - Base64 encoded KSM config
+      - KSM_CONFIG=YOURKSMTOKENHERE
+      # KSM Record Titles (fixed titles)
+      - COMMANDER_RECORD=COMMADERSERVICEMODECONFIG
+      - SLACK_RECORD=COMMADERSERVICEMODESLACKCONFIG
+    depends_on:
+      commander:
+        condition: service_healthy
     restart: unless-stopped
-    
-    # Load environment variables from .env file
-    env_file:
-      - .env
-    
-    # Mount logs directory for persistence
     volumes:
       - ./logs:/app/logs
-    
-    # For connecting to Keeper Commander on host machine
+    # For connecting to Keeper Commander service
     extra_hosts:
       - "host.docker.internal:host-gateway"
     
