@@ -5,7 +5,7 @@ services:
     ports:
       - port:port
     image: keeper/commander:latest
-    command: service-create -p 8900 -c 'search, share-record, share-folder, record-add, one-time-share, pedm, device-approve, get' -f json -q y -ur J_ZQJg4sMBsF0GYsuCtDHA --ksm-config eyJob3N0bmFtZSI6ICJxYS5rZWVwZXJzZWN1cml0eS5jb20iLCAiY2xpZW50SWQiOiAiK0pMQ0JyWlJhNUZCL3d3YUQ0Y1Z6bVpHUzc1d0JIRENCN0lyeHJ5Vk5ZSEFQZ2pQV1ZHUWszNmlCSTRFcU1RSDcvWWJiTGMxVUh6R3JFaHdOLzlZcXc9PSIsICJwcml2YXRlS2V5IjogIk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ2FMY1hjUWVJN2p2a1RtT3dCQXZheXZWcHkrQ0k4M05GQ2dPL1p3eDBiU2FoUkFOQ0FBUkVqRGd0U3hKek9PWGkvcHpSdW1XMVJ3NjdyY1p1VVFuUVJBUWlYdWtQTkMvOW5NMXBIVC9vbkxzVkk2WjBGZmFrRWhCSk1MajFhZWxkK0ZQa3JEaXIiLCAic2VydmVyUHVibGljS2V5SWQiOiAiOSIsICJhcHBLZXkiOiAiRlFIemt2Tkcvb2VMcm5rU2diRWZwUlJKU01MNDlhYXBzc3RUTUlIL0dmQT0iLCAiYXBwT3duZXJQdWJsaWNLZXkiOiAiQk9sMlp5TG9CUWdVZGRTenZrK1YzaDkvcXFWQjNqeTh6VUtrU3JleVlVQzZJdk1OR2l5d01oNWgyVTlGTVlLQ3laL3VJMDZUM2FqY0dIaDF0Z3F2UFE0PSJ9 --record J_ZQJg4sMBsF0GYsuCtDHA
+    command: service-create -p 8900 -c 'search, share-record, share-folder, record-add, one-time-share, pedm, device-approve, get' -f json -q y -ur J_ZQJg4sMBsF0GYsuCtDHA --ksm-config XXXXXXXX --record XXXXXXXX
     healthcheck:
       test:
         - CMD-SHELL
