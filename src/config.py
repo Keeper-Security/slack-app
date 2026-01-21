@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 from .logger import logger
+from .utils import fix_service_url_for_docker
 
 
 @dataclass
@@ -251,15 +252,18 @@ class Config:
         # Load config from YAML file or environment variables
         keeper_data = self._data.get('keeper', {})
         if keeper_data.get('service_url'):
+            # Fix localhost -> commander for Docker
+            service_url = fix_service_url_for_docker(keeper_data.get('service_url'))
             return KeeperConfig(
-                service_url=keeper_data.get('service_url'),
+                service_url=service_url,
                 api_key=keeper_data.get('api_key')
             )
         
         # Default fallback - configure via config file or KSM
         logger.info("No Keeper config found. Configure via  KSM records (Docker) slack_config.yaml (local) or.")
+        default_url = fix_service_url_for_docker('http://localhost:8080')
         return KeeperConfig(
-            service_url='http://localhost:8080',
+            service_url=default_url,
             api_key=None
         )
     

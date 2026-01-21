@@ -12,10 +12,50 @@
 
 """Utility functions for Keeper Slack Integration."""
 
+import os
 import re
 import uuid
 from datetime import datetime
 from typing import Tuple, Optional
+
+
+def is_running_in_docker() -> bool:
+    """
+    Check if the application is running inside a Docker container.
+    """
+    # Check for Docker-specific files
+    if os.path.exists('/.dockerenv'):
+        return True
+    
+    # Check cgroup (Linux containers)
+    try:
+        with open('/proc/1/cgroup', 'r') as f:
+            return 'docker' in f.read()
+    except Exception:
+        pass
+    
+    return False
+
+
+def fix_service_url_for_docker(service_url: str) -> str:
+    """
+    Replace localhost with 'commander' service name in Docker environments.
+    This ensures Docker containers can communicate with each other.
+    """
+    if not service_url:
+        return service_url
+    
+    # Only apply fix if running in Docker
+    if not is_running_in_docker():
+        return service_url
+    
+    # Check if localhost or 127.0.0.1 is in the URL
+    if 'localhost' in service_url.lower() or '127.0.0.1' in service_url:
+        # Replace localhost/127.0.0.1 with commander
+        service_url = service_url.replace('localhost', 'commander')
+        service_url = service_url.replace('127.0.0.1', 'commander')
+    
+    return service_url
 
 
 def generate_approval_id() -> str:

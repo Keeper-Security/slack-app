@@ -21,6 +21,7 @@ import tempfile
 from typing import Dict, Any, Optional
 
 from .logger import logger
+from .utils import fix_service_url_for_docker
 
 
 def check_ksm_dependency() -> bool:
@@ -134,7 +135,6 @@ def get_secret_by_uid_or_title(secrets_manager, record_identifier: str):
     try:
         secrets = secrets_manager.get_secrets([record_identifier])
         if secrets and len(secrets) > 0:
-            logger.info(f"Found record by UID: {record_identifier}")
             return secrets[0]
         else:
             logger.debug(f"Record not found by UID: {record_identifier}, trying title lookup...")
@@ -355,6 +355,8 @@ def fetch_credentials_from_ksm(
                     pass
                 
                 if service_url:
+                    # Fix localhost -> commander for Docker
+                    service_url = fix_service_url_for_docker(service_url)
                     keeper_config['service_url'] = service_url
                 if api_key:
                     keeper_config['api_key'] = api_key
