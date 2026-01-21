@@ -57,10 +57,17 @@ def handle_approve_pedm_request(body: Dict[str, Any], client, config, keeper_cli
             
             logger.ok(f"PEDM request {approval_uid} approved by {approver_id}")
         else:
-            # Update with error
-            error_msg = result.get('error', 'Unknown error')
-            status_text = f"*Status:* Approval failed - {error_msg}"
+            # Check if request was already processed
+            if result.get('already_processed'):
+                status_text = f"*Status:* Already processed (approved/denied elsewhere)\n*Checked by:* <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+                logger.warning(f"PEDM request {approval_uid} was already processed")
+            else:
+                # Update with error
+                error_msg = result.get('error', 'Unknown error')
+                status_text = f"*Status:* Approval failed - {error_msg}"
+                logger.error(f"Failed to approve PEDM request {approval_uid}: {error_msg}")
             
+            # Update the message with status (for both already_processed and error cases)
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
             updated_blocks.append({
@@ -74,8 +81,6 @@ def handle_approve_pedm_request(body: Dict[str, Any], client, config, keeper_cli
                 blocks=updated_blocks,
                 text=status_text
             )
-            
-            logger.error(f"Failed to approve PEDM request {approval_uid}: {error_msg}")
             
     except Exception as e:
         logger.error(f"Exception in PEDM approve handler: {e}")
@@ -127,10 +132,17 @@ def handle_deny_pedm_request(body: Dict[str, Any], client, config, keeper_client
             
             logger.ok(f"PEDM request {approval_uid} denied by {approver_id}")
         else:
-            # Update with error
-            error_msg = result.get('error', 'Unknown error')
-            status_text = f"*Status:* Denial failed - {error_msg}"
+            # Check if request was already processed
+            if result.get('already_processed'):
+                status_text = f"*Status:* Already processed (approved/denied elsewhere)\n*Checked by:* <@{approver_id}>\n*Updated:* {_format_timestamp()}"
+                logger.warning(f"PEDM request {approval_uid} was already processed")
+            else:
+                # Update with error
+                error_msg = result.get('error', 'Unknown error')
+                status_text = f"*Status:* Denial failed - {error_msg}"
+                logger.error(f"Failed to deny PEDM request {approval_uid}: {error_msg}")
             
+            # Update the message with status (for both already_processed and error cases)
             original_blocks = body["message"]["blocks"]
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
             updated_blocks.append({
@@ -144,8 +156,6 @@ def handle_deny_pedm_request(body: Dict[str, Any], client, config, keeper_client
                 blocks=updated_blocks,
                 text=status_text
             )
-            
-            logger.error(f"Failed to deny PEDM request {approval_uid}: {error_msg}")
             
     except Exception as e:
         logger.error(f"Exception in PEDM deny handler: {e}")

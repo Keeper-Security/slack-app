@@ -1,5 +1,5 @@
 # ============================================================
-# SLACK CONFIGURATION
+# SLACK CONFIGURATION for local development
 # ============================================================
 slack:
   app_token: "xapp-your-app-token"

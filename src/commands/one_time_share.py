@@ -106,6 +106,18 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
                 response_type="ephemeral"
             )
             return
+
+        # Check if record is a PAM type (one-time-share cannot be created for PAM records)
+        if 'pam' in record_details.record_type.lower():
+            logger.warning(f"One-time share requested for PAM record: {identifier} (type: {record_details.record_type})")
+            respond(
+                text=f"*PAM Record Not Supported*\n\n"
+                     f"The record `{identifier}` is a **PAM record**.\n\n"
+                     f"One-time share links cannot be created for PAM records.\n\n"
+                     f"Please contact your administrator for assistance with PAM record access.",
+                response_type="ephemeral"
+            )
+            return
     
     # Generate unique approval ID
     approval_id = generate_approval_id()
