@@ -68,6 +68,8 @@ class KeeperClient:
         """
         Fetch the Keeper server domain using the 'server' command.
         """
+        default_domain = "keepersecurity.com"
+        
         try:
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
@@ -77,32 +79,31 @@ class KeeperClient:
             
             if response.status_code != 202:
                 logger.warning(f"Failed to fetch server domain: {response.status_code}, using default")
-                return "keepersecurity.com"
+                return default_domain
             
             result = response.json()
             request_id = result.get('request_id')
             
             if not request_id:
                 logger.warning("No request_id for server command, using default domain")
-                return "keepersecurity.com"
+                return default_domain
             
             # Poll for result
             result_data = self._poll_for_result(request_id, max_wait=10)
             
             if not result_data:
                 logger.warning("Server command timed out, using default domain")
-                return "keepersecurity.com"
+                return default_domain
             
             if result_data.get('status') == 'success':
-                server_domain = result_data.get('message', 'keepersecurity.com')
-                return server_domain
+                return result_data.get('message', default_domain)
             else:
                 logger.warning("Server command failed, using default domain")
-                return "keepersecurity.com"
+                return default_domain
                 
         except Exception as e:
             logger.warning(f"Exception fetching server domain: {e}, using default")
-            return "keepersecurity.com"
+            return default_domain
     
     def update_credentials(self, service_url: str, api_key: Optional[str] = None):
         """

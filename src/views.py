@@ -19,6 +19,9 @@ from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
 from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
 
+# Default Keeper server domain
+DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
+
 
 def post_approval_request(
     client,
@@ -775,7 +778,7 @@ def update_approval_message(
         blocks=updated_blocks
     )
 
-def _get_vault_deep_link(item_type: str, uid: str, server_domain: str = "keepersecurity.com") -> str:
+def _get_vault_deep_link(item_type: str, uid: str, server_domain: str = DEFAULT_KEEPER_DOMAIN) -> str:
     """
     Generate Keeper vault deep link URL for records or folders.
     """
@@ -794,7 +797,7 @@ def send_access_granted_dm(
     expires_at: str,
     uid: str = None,
     permission: str = None,
-    server_domain: str = "keepersecurity.com"
+    server_domain: str = DEFAULT_KEEPER_DOMAIN
 ):
     """Send DM to requester when access is granted."""
     try:
