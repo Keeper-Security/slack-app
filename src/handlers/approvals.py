@@ -169,13 +169,20 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 # One-time share created
                 status_msg = f"*One-Time Share Link Created*\nLink sent to requester • Expires: {expires_at}"
                 approval_text = "One-Time Share Request Approved"
+                uid_label = "Record UID"
             else:
                 # Access granted
                 if is_permanent:
                     status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                 else:
                     status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
-                approval_text = "Access Request Approved"
+                # Set approval text based on request type
+                if request_type == "record":
+                    approval_text = "Record Access Request Approved"
+                    uid_label = "Record UID"
+                elif request_type == "folder":
+                    approval_text = "Folder Access Request Approved"
+                    uid_label = "Folder UID"
             
             client.chat_update(
                 channel=body["channel"]["id"],
@@ -194,7 +201,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Record:* `{identifier}`\n"
+                            "text": f"*{uid_label}:* `{identifier}`\n"
                                     f"*Requester:* <@{requester_id}>\n"
                                     f"*Approved by:* <@{approver_id}>"
                         }
@@ -245,7 +252,8 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     share_url=result.get('share_url', 'N/A'),
                     expires_at=result.get('expires_at', duration_text),
                     uid=identifier,
-                    permission=permission.value
+                    permission=permission.value,
+                    server_domain=keeper_client.server_domain
                 )
             logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
         else:
