@@ -1275,7 +1275,7 @@ class KeeperClient:
             logger.error(f"Exception syncing PEDM data: {e}")
             return False
     
-    def get_pending_pedm_requests(self) -> List[Dict[str, Any]]:
+    def get_pending_pedm_requests(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get pending PEDM approval requests.
         """
@@ -1293,24 +1293,24 @@ class KeeperClient:
             
             if response.status_code != 202:
                 logger.error(f"Failed to submit PEDM list command: {response.status_code}")
-                return []
+                return None
             
             request_id = response.json().get('request_id')
             if not request_id:
                 logger.error("No request_id received for PEDM list")
-                return []
+                return None
             
             result_data = self._poll_for_result(request_id, max_wait=30)
             
             if not result_data:
                 logger.warning("PEDM list command timed out")
-                return []
+                return None
             
             status = result_data.get('status')
             if status == 'error':
                 error_msg = result_data.get('message', 'Unknown error')
                 logger.error(f"PEDM command failed: {error_msg}")
-                return []
+                return None
             
             if status == 'success':
                 data = result_data.get('data')
@@ -1325,15 +1325,13 @@ class KeeperClient:
                     return data
                 else:
                     logger.error(f"Unexpected PEDM data type: {type(data)}")
-                    return []
+                    return None
             
-            return []
+            return None 
             
         except Exception as e:
-            logger.error(f"Exception fetching PEDM requests: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
+            logger.error(f"Exception fetching PEDM requests: {e}", exc_info=True)
+            return None
     
     def approve_pedm_request(self, approval_uid: str) -> Dict[str, Any]:
         """

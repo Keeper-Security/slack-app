@@ -66,9 +66,7 @@ class PEDMPoller:
                 
             except Exception as e:
                 consecutive_errors += 1
-                logger.error(f"PEDM polling error ({consecutive_errors}/{max_errors}): {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"PEDM polling error ({consecutive_errors}/{max_errors}): {e}", exc_info=True)
                 
                 # Stop polling after too many consecutive errors
                 if consecutive_errors >= max_errors:
@@ -82,7 +80,12 @@ class PEDMPoller:
         """Check for new pending requests and post them to Slack."""
         pending = self.keeper_client.get_pending_pedm_requests()
         
-        if not pending:
+        # None means API failure/timeout - don't clear seen list
+        if pending is None:
+            logger.debug("PEDM API failed/timed out, keeping seen list intact")
+            return
+
+        if len(pending) == 0:
             with self._lock:
                 if self.seen_approval_uids:
                     logger.debug("No pending PEDM requests, clearing seen list")

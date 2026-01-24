@@ -83,9 +83,7 @@ def handle_approve_pedm_request(body: Dict[str, Any], client, config, keeper_cli
             )
             
     except Exception as e:
-        logger.error(f"Exception in PEDM approve handler: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Exception in PEDM approve handler: {e}", exc_info=True)
 
 
 def handle_deny_pedm_request(body: Dict[str, Any], client, config, keeper_client):
@@ -158,9 +156,7 @@ def handle_deny_pedm_request(body: Dict[str, Any], client, config, keeper_client
             )
             
     except Exception as e:
-        logger.error(f"Exception in PEDM deny handler: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Exception in PEDM deny handler: {e}", exc_info=True)
 
 
 def _format_timestamp() -> str:
