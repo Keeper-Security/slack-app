@@ -218,8 +218,9 @@ def sanitize_command_input(text: str) -> str:
         return text
     
     # Characters that could be used for injection
+    # Note: '/' is intentionally NOT included - it's needed for searching records with paths
     dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '[', ']', 
-                       '!', '\\', '\n', '\r', '\x00', ':', '/']
+                       '!', '\\', '\n', '\r', '\x00', ':']
     
     sanitized = text
     for char in dangerous_chars:
