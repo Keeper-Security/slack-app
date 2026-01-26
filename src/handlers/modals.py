@@ -273,11 +273,14 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             else:
                 # Notify requester with access granted (works for both regular and self-destruct records)
                 # Build message with self-destruct note if applicable
+                # Generate deep link based on request type
+                from ..views import _get_vault_deep_link
+                deep_link = _get_vault_deep_link(request_type, selected_uid, keeper_client.server_domain)
+                item_label = "Record" if request_type == "record" else "Folder"
                 access_message = f"*Access Granted!*\n\n" \
                                 f"*Request ID:* `{approval_id}`\n" \
-                                f"*Record:* {record_title}\n" \
-                                f"*UID:* `{selected_uid}`\n" \
-                                f"*Access Type:* Direct vault access\n" \
+                                f"*{item_label}:* {record_title}\n" \
+                                f"*{item_label} Link:* <{deep_link}|Open in Vault>\n" \
                                 f"*Permission:* {permission.value}\n" \
                                 f"*Expires:* {result.get('expires_at', duration_text)}"
                 
@@ -307,6 +310,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     if request_type == "one_time_share":
                         status_msg = f"*One-Time Share Link Created*\nLink sent to requester • Expires: {expires_at}"
                         approval_text = "One-Time Share Request Approved"
+                        uid_label = "Record UID"
                     else:
                         if is_permanent:
                             status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
@@ -317,8 +321,15 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         if is_self_destruct:
                             status_msg += f"\n\n*Self-Destruct Record*\nRecord will auto-delete after {duration_text}"
                             approval_text = "Self-Destruct Record Access Approved"
+                            uid_label = "Record UID"
                         else:
-                            approval_text = "Access Request Approved"
+                            # Set approval text and UID label based on request type
+                            if request_type == "record":
+                                approval_text = "Record Access Request Approved"
+                                uid_label = "Record UID"
+                            elif request_type == "folder":
+                                approval_text = "Folder Access Request Approved"
+                                uid_label = "Folder UID"
                     
                     client.chat_update(
                         channel=channel_id,
@@ -337,7 +348,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                                 "type": "section",
                                 "text": {
                                     "type": "mrkdwn",
-                                    "text": f"*Record:* `{selected_uid}`\n"
+                                    "text": f"*{uid_label}:* `{selected_uid}`\n"
                                             f"*Requester:* <@{requester_id}>\n"
                                             f"*Approved by:* <@{approver_id}>"
                                 }

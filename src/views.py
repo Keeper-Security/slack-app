@@ -19,6 +19,9 @@ from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
 from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
 
+# Default Keeper server domain
+DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
+
 
 def post_approval_request(
     client,
@@ -775,6 +778,15 @@ def update_approval_message(
         blocks=updated_blocks
     )
 
+def _get_vault_deep_link(item_type: str, uid: str, server_domain: str = DEFAULT_KEEPER_DOMAIN) -> str:
+    """
+    Generate Keeper vault deep link URL for records or folders.
+    """
+    if item_type == "record":
+        return f"https://{server_domain}/vault/#detail/{uid}"
+    else:  # folder
+        return f"https://{server_domain}/vault/#shared_folder/{uid}"
+
 def send_access_granted_dm(
     client,
     user_id: str,
@@ -784,29 +796,27 @@ def send_access_granted_dm(
     share_url: str,
     expires_at: str,
     uid: str = None,
-    permission: str = None
+    permission: str = None,
+    server_domain: str = DEFAULT_KEEPER_DOMAIN
 ):
     """Send DM to requester when access is granted."""
     try:
         dm_response = client.conversations_open(users=[user_id])
         dm_channel_id = dm_response["channel"]["id"]
         
-        # Build access info message
-        if share_url and share_url != 'N/A':
-            access_info = f"Access URL: {share_url}"
-        else:
-            access_info = "Access Type: Direct vault access (check your Keeper vault)"
-
         # Build the message with detailed information
         message = f"*Access Granted!*\n\n" \
                   f"*Request ID:* `{approval_id}`\n" \
                   f"*{item_type.capitalize()}:* {item_title}\n"
         
-        # Add UID if provided
+        # Add deep link instead of UID
         if uid:
-            message += f"*UID:* `{uid}`\n"
+            deep_link = _get_vault_deep_link(item_type, uid, server_domain)
+            message += f"*{item_type.capitalize()} Link:* <{deep_link}|Open in Vault>\n"
         
-        message += f"*{access_info}*\n"
+        # Add share URL only if it's a one-time share link
+        if share_url and share_url != 'N/A':
+            message += f"*Share URL:* {share_url}\n"
         
         # Add permission if provided
         if permission:
