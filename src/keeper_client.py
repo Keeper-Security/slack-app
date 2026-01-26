@@ -122,14 +122,38 @@ class KeeperClient:
         
         logger.ok(f"Keeper client credentials updated: {self.base_url}")
     
+    def _sanitize_search_query(self, query: str) -> str:
+        """
+        Sanitize search query to prevent command injection.
+        Removes dangerous shell characters.
+        """
+        if not query:
+            return query
+        
+        # Characters that could be used for command injection
+        dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '[', ']', 
+                          '!', '\\', '\n', '\r', '\x00', '<', '>', '"', "'"]
+        
+        sanitized = query
+        for char in dangerous_chars:
+            sanitized = sanitized.replace(char, '')
+        
+        return sanitized.strip()
+    
     def search_records(self, query: str, limit: int = 20) -> List[KeeperRecord]:
         """
         Search for records using Service Mode search command with category filter.
         """
         try:
+            # Sanitize query to prevent command injection
+            safe_query = self._sanitize_search_query(query)
+            if not safe_query:
+                logger.debug("Empty query after sanitization")
+                return []
+            
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c r {shlex.quote(query)} --format=json'},
+                json={"command": f'search -c r "{safe_query}" --format=json'},
                 timeout=10
             )
             
@@ -164,10 +188,16 @@ class KeeperClient:
         Search for shared folders using Service Mode search command with category filter.
         """
         try:
+            # Sanitize query to prevent command injection
+            safe_query = self._sanitize_search_query(query)
+            if not safe_query:
+                logger.debug("Empty query after sanitization")
+                return []
+            
             # Use search command with shared folder category filter (-c s)
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c s {shlex.quote(query)} --format=json'},
+                json={"command": f'search -c s "{safe_query}" --format=json'},
                 timeout=10
             )
             
