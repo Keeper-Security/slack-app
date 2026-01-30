@@ -854,26 +854,25 @@ class KeeperClient:
                 else:
                     if response.status_code == 202:
                         logger.debug("Async command still processing, waiting...")
-                    else:
-                        logger.warning(f"Poll returned status {response.status_code}")
-                        try:
-                            response_body = response.text
-                            logger.debug(f"Poll response body: {response_body}")
-                        except:
-                            pass
-                    if response.status_code == 400:
-                        logger.error(f"Poll returned 400 - returning error immediately")
-                        # Parse response body to include actual error message
+                    elif response.status_code in (400, 500):
+                        # Error responses - return immediately with error details
+                        logger.error(f"Poll returned {response.status_code} - returning error immediately")
                         try:
                             error_response = response.json()
-                            error_response['http_status'] = 400
+                            error_response['http_status'] = response.status_code
                             return error_response
                         except:
                             return {
                                 'status': 'error',
-                                'message': 'Command execution failed',
-                                'http_status': 400
+                                'error': f'Server error ({response.status_code})',
+                                'http_status': response.status_code
                             }
+                    else:
+                        logger.warning(f"Poll returned status {response.status_code}")
+                        try:
+                            logger.debug(f"Poll response body: {response.text}")
+                        except:
+                            pass
                 
                 # Wait before next poll
                 time.sleep(poll_interval)
