@@ -1268,7 +1268,7 @@ class KeeperClient:
         try:
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": "epm sync-down"},
+                json={"command": "pedm sync-down"},
                 timeout=10
             )
             
@@ -1316,7 +1316,7 @@ class KeeperClient:
 
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": "epm approval list --type pending --format=json"},
+                json={"command": "pedm approval list --type pending --format=json"},
                 timeout=10
             )
             
@@ -1367,7 +1367,7 @@ class KeeperClient:
         Approve a PEDM request.
         """
         try:
-            command = f"epm approval action --approve {approval_uid}"
+            command = f"pedm approval action --approve {approval_uid}"
             
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
@@ -1410,7 +1410,7 @@ class KeeperClient:
         Deny a PEDM request.
         """
         try:
-            command = f"epm approval action --deny {approval_uid}"
+            command = f"pedm approval action --deny {approval_uid}"
             logger.info(f"Denying PEDM request: {approval_uid}")
             
             response = self.session.post(
