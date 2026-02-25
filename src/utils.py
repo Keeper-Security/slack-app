@@ -51,9 +51,9 @@ def fix_service_url_for_docker(service_url: str) -> str:
     
     # Check if localhost or 127.0.0.1 is in the URL
     if 'localhost' in service_url.lower() or '127.0.0.1' in service_url:
-        # Replace localhost/127.0.0.1 with commander
-        service_url = service_url.replace('localhost', 'commander')
-        service_url = service_url.replace('127.0.0.1', 'commander')
+        # Replace localhost/127.0.0.1 with commander-slack
+        service_url = service_url.replace('localhost', 'commander-slack')
+        service_url = service_url.replace('127.0.0.1', 'commander-slack')
     
     return service_url
 

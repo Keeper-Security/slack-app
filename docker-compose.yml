@@ -1,6 +1,6 @@
 
 services:
-  commander:
+  commander-slack:
     container_name: keeper-service
     ports:
       - port:port
@@ -29,7 +29,7 @@ services:
       - COMMANDER_RECORD=COMMADERSERVICEMODECONFIG
       - SLACK_RECORD=COMMADERSERVICEMODESLACKCONFIG
     depends_on:
-      commander:
+      commander-slack:
         condition: service_healthy
     restart: unless-stopped
     volumes:
