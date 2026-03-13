@@ -239,6 +239,19 @@ class PEDMRequest:
             elif info.startswith('CommandLine='):
                 command = info.split('=', 1)[1]
         
+        justification_text = ''
+        raw_justification = data.get('justification', '')
+        if raw_justification:
+            try:
+                import json
+                justification_data = json.loads(raw_justification)
+                if isinstance(justification_data, dict):
+                    justification_text = justification_data.get('text', '')
+                else:
+                    justification_text = str(raw_justification)
+            except (json.JSONDecodeError, TypeError):
+                justification_text = str(raw_justification)
+        
         return cls(
             approval_uid=data.get('approval_uid', ''),
             approval_type=data.get('approval_type', ''),
@@ -249,7 +262,7 @@ class PEDMRequest:
             file_name=file_name,
             file_path=file_path,
             description=description,
-            justification=data.get('justification', ''),
+            justification=justification_text,
             expire_in=data.get('expire_in', 30),
             created=data.get('created', '')
         )
