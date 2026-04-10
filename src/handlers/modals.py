@@ -606,6 +606,9 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
     url = (values.get("record_url", {}).get("url_input", {}).get("value") or "").strip()
     notes = (values.get("record_notes", {}).get("notes_input", {}).get("value") or "").strip()
     
+    auto_gen_selected = values.get("auto_gen_password", {}).get("auto_gen_checkbox", {}).get("selected_options", [])
+    auto_gen_checked = any(opt.get("value") == "auto_gen" for opt in auto_gen_selected)
+    
     # Extract self-destruct checkbox and expiration
     self_destruct_enabled = False
     self_destruct_duration = None
@@ -625,7 +628,6 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
         metadata['self_destruct_duration'] = self_destruct_duration
     
     if not title:
-        # Return error to modal
         return {
             "response_action": "errors",
             "errors": {
@@ -633,15 +635,22 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
             }
         }
     
+    if auto_gen_checked and password and password.upper() != '$GEN':
+        return {
+            "response_action": "errors",
+            "errors": {
+                "record_password": "Please either enter a password or check auto-generate, not both."
+            }
+        }
+    
     try:
-        # Create the record
         logger.info(f"Creating record '{title}' for requester {requester_id}" + (f" with self-destruct" if self_destruct_enabled else ""))
-        generate_password = not password
+        generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
         
         create_result = keeper_client.create_record(
             title=title,
             login=login or None,
-            password=password or None,
+            password=None if generate_password else (password or None),
             url=url or None,
             notes=notes or None,
             generate_password=generate_password,

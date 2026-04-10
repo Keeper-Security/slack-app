@@ -26,6 +26,7 @@ from .commands import (
     handle_request_record,
     handle_request_folder,
     handle_one_time_share,
+    handle_create_secret
 )
 from .handlers import (
     handle_approve_action,
@@ -127,6 +128,11 @@ class KeeperSlackApp:
         def cmd_one_time_share(ack, body, client, respond):
             ack()
             handle_one_time_share(body, client, respond, self.config, self.keeper_client)
+
+        @self.slack_app.command("/keeper-create-secret")
+        def cmd_create_secret(ack, body, client, respond):
+            ack()
+            handle_create_secret(body, client, respond, self.config, self.keeper_client)
 
     
     def _register_interactions(self):
@@ -390,6 +396,17 @@ class KeeperSlackApp:
             from .handlers.modals import handle_one_time_share_modal_submit
             result = handle_one_time_share_modal_submit(body, client, self.config, self.keeper_client)
             ack(result) if result else ack()
+        
+        # Create secret modal submissions(For Requesting/End-users Users)
+        @self.slack_app.view("create_secret_folder_select")
+        def view_create_secret_folder(ack, body, client):
+            from .handlers.create_secret import handle_create_secret_folder_select
+            handle_create_secret_folder_select(ack, body, client, self.config, self.keeper_client)
+        
+        @self.slack_app.view("create_secret_submit")
+        def view_create_secret_submit(ack, body, client):
+            from .handlers.create_secret import handle_create_secret_submit
+            handle_create_secret_submit(ack, body, client, self.config, self.keeper_client)
     
     def _register_app_home_events(self):
         """Register App Home tab event handlers."""

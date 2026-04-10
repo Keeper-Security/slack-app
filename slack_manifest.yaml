@@ -29,6 +29,10 @@ features:
       description: Request a one-time share link to a Keeper record
       usage_hint: "[record-uid-or-description] [justification]"
       should_escape: false
+    - command: /keeper-create-secret
+      description: Create a new secret record in a shared folder
+      usage_hint: "Opens a form to select your shared folder and create a record"
+      should_escape: false
 
 oauth_config:
   scopes:

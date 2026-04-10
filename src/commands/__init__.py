@@ -15,10 +15,12 @@
 from .request_record import handle_request_record
 from .request_folder import handle_request_folder
 from .one_time_share import handle_one_time_share
+from .create_secret import handle_create_secret
 
 __all__ = [
     'handle_request_record',
     'handle_request_folder',
     'handle_one_time_share',
+    'handle_create_secret',
 ]
 
