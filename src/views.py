@@ -18,6 +18,7 @@ import json
 from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
 from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
+from .logger import logger
 
 # Default Keeper server domain
 DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
@@ -462,9 +463,9 @@ def build_search_modal(
         # Add initial_option if we have a newly created record
         if initial_option:
             radio_block["element"]["initial_option"] = initial_option
-            print(f"[DEBUG] Pre-selecting newly created record: {newly_created_uid}")
+            logger.info(f"Pre-selecting newly created record: {newly_created_uid}")
         else:
-            print(f"[DEBUG] No pre-selection - newly_created_uid: {newly_created_uid}")
+            logger.info(f"No pre-selection - newly_created_uid: {newly_created_uid}")
         
         blocks.append(radio_block)
         
@@ -855,7 +856,7 @@ def send_access_granted_dm(
             text=message
         )
     except Exception as e:
-        print(f"Error sending DM to {user_id}: {e}")
+        logger.error(f"Failed to send DM to {user_id}: {e}")
 
 def send_access_denied_dm(
     client,
@@ -915,7 +916,7 @@ def send_share_link_dm(
             text=message
         )
     except Exception as e:
-        print(f"Error sending share link DM: {e}")
+        logger.error(f"Failed to send share link DM: {e}")
 
 def format_timestamp(timestamp_str: Optional[str] = None) -> str:
     """
@@ -948,7 +949,7 @@ def post_pedm_approval_request(
     try:
         request = PEDMRequest.from_dict(request_data)
     except Exception as e:
-        print(f"[ERROR] Failed to parse PEDM request: {e}")
+        logger.error(f"Failed to parse PEDM request: {e}")
         return
     
     # Calculate expiration
@@ -957,7 +958,7 @@ def post_pedm_approval_request(
         expires_dt = created_dt + timedelta(minutes=request.expire_in)
         expires_str = expires_dt.strftime('%Y-%m-%d %H:%M:%S')
     except Exception as e:
-        print(f"[WARN] Could not parse expiration time: {e}")
+        logger.warning(f"Could not parse expiration time: {e}")
         expires_str = f"{request.expire_in} minutes from creation"
     
     # function to truncate long text
@@ -1074,9 +1075,9 @@ def post_pedm_approval_request(
             unfurl_links=False,
             unfurl_media=False
         )
-        print(f"[OK] Posted PEDM request {request.approval_uid} to Slack")
+        logger.ok(f"Posted PEDM request {request.approval_uid} to Slack")
     except Exception as e:
-        print(f"[ERROR] Failed to post PEDM request to Slack: {e}")
+        logger.error(f"Failed to post PEDM request to Slack: {e}")
 
 
 def post_device_approval_request(
@@ -1146,9 +1147,9 @@ def post_device_approval_request(
             blocks=blocks,
             text=f"Cloud SSO Device Approval Request from {email} - {device_name}"
         )
-        print(f"[OK] Posted device approval request {device_id} to Slack")
+        logger.ok(f"Posted device approval request {device_id} to Slack")
     except Exception as e:
-        print(f"[ERROR] Failed to post device approval to Slack: {e}")
+        logger.error(f"Failed to post device approval to Slack: {e}")
 
 
 def build_request_modal(
@@ -1311,7 +1312,7 @@ def build_create_secret_record_form_modal(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":warning: Auto-generate passwords to keep them fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
+                    "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
                 }
             ]
         },
@@ -1482,4 +1483,4 @@ def post_create_secret_notification(
             unfurl_media=False
         )
     except Exception as e:
-        print(f"[ERROR] Failed to post create secret notification: {e}")
+        logger.error(f"Failed to post create secret notification: {e}")
