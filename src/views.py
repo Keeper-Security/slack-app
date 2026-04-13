@@ -591,7 +591,7 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": ":warning: End-to-end encrypted \u2022 Your data is protected by Keeper\u2019s zero-knowledge architecture."
+                        "text": ":warning: Auto-generate passwords to keep them fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
                     }
                 ]
             },
@@ -1311,7 +1311,7 @@ def build_create_secret_record_form_modal(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":warning: End-to-end encrypted \u2022 Your data is protected by Keeper\u2019s zero-knowledge architecture."
+                    "text": ":warning: Auto-generate passwords to keep them fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
                 }
             ]
         },
