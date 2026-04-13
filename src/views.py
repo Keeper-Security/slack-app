@@ -592,7 +592,7 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": ":warning: Auto-generate passwords to keep them fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
+                        "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
                     }
                 ]
             },
