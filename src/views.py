@@ -18,6 +18,7 @@ import json
 from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
 from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
+from .logger import logger
 
 # Default Keeper server domain
 DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
@@ -462,9 +463,9 @@ def build_search_modal(
         # Add initial_option if we have a newly created record
         if initial_option:
             radio_block["element"]["initial_option"] = initial_option
-            print(f"[DEBUG] Pre-selecting newly created record: {newly_created_uid}")
+            logger.info(f"Pre-selecting newly created record: {newly_created_uid}")
         else:
-            print(f"[DEBUG] No pre-selection - newly_created_uid: {newly_created_uid}")
+            logger.info(f"No pre-selection - newly_created_uid: {newly_created_uid}")
         
         blocks.append(radio_block)
         
@@ -586,6 +587,15 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                     "text": f"*Creating record for:* <@{approval_data.get('requester_id')}>\n_After creation, you'll be able to review and approve sharing_"
                 }
             },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
+                    }
+                ]
+            },
             {"type": "divider"},
             {
                 "type": "input",
@@ -630,13 +640,30 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
             },
             {
                 "type": "input",
+                "block_id": "auto_gen_password",
+                "label": {"type": "plain_text", "text": "Password Generation"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "auto_gen_checkbox",
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "\ud83c\udfb2 Auto-generate password"},
+                            "value": "auto_gen"
+                        }
+                    ]
+                },
+                "optional": True
+            },
+            {
+                "type": "input",
                 "block_id": "record_password",
-                "label": {"type": "plain_text", "text": "Password (Required)"},
+                "label": {"type": "plain_text", "text": "Password"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "password_input",
-                    "placeholder": {"type": "plain_text", "text": "Enter $GEN to auto-generate or provide your own"}
+                    "placeholder": {"type": "plain_text", "text": "Enter password (or check auto-generate above)"}
                 },
+                "optional": True
             },
             {
                 "type": "input",
@@ -829,7 +856,7 @@ def send_access_granted_dm(
             text=message
         )
     except Exception as e:
-        print(f"Error sending DM to {user_id}: {e}")
+        logger.error(f"Failed to send DM to {user_id}: {e}")
 
 def send_access_denied_dm(
     client,
@@ -889,7 +916,7 @@ def send_share_link_dm(
             text=message
         )
     except Exception as e:
-        print(f"Error sending share link DM: {e}")
+        logger.error(f"Failed to send share link DM: {e}")
 
 def format_timestamp(timestamp_str: Optional[str] = None) -> str:
     """
@@ -922,7 +949,7 @@ def post_pedm_approval_request(
     try:
         request = PEDMRequest.from_dict(request_data)
     except Exception as e:
-        print(f"[ERROR] Failed to parse PEDM request: {e}")
+        logger.error(f"Failed to parse PEDM request: {e}")
         return
     
     # Calculate expiration
@@ -931,7 +958,7 @@ def post_pedm_approval_request(
         expires_dt = created_dt + timedelta(minutes=request.expire_in)
         expires_str = expires_dt.strftime('%Y-%m-%d %H:%M:%S')
     except Exception as e:
-        print(f"[WARN] Could not parse expiration time: {e}")
+        logger.warning(f"Could not parse expiration time: {e}")
         expires_str = f"{request.expire_in} minutes from creation"
     
     # function to truncate long text
@@ -1048,9 +1075,9 @@ def post_pedm_approval_request(
             unfurl_links=False,
             unfurl_media=False
         )
-        print(f"[OK] Posted PEDM request {request.approval_uid} to Slack")
+        logger.ok(f"Posted PEDM request {request.approval_uid} to Slack")
     except Exception as e:
-        print(f"[ERROR] Failed to post PEDM request to Slack: {e}")
+        logger.error(f"Failed to post PEDM request to Slack: {e}")
 
 
 def post_device_approval_request(
@@ -1120,9 +1147,9 @@ def post_device_approval_request(
             blocks=blocks,
             text=f"Cloud SSO Device Approval Request from {email} - {device_name}"
         )
-        print(f"[OK] Posted device approval request {device_id} to Slack")
+        logger.ok(f"Posted device approval request {device_id} to Slack")
     except Exception as e:
-        print(f"[ERROR] Failed to post device approval to Slack: {e}")
+        logger.error(f"Failed to post device approval to Slack: {e}")
 
 
 def build_request_modal(
@@ -1202,3 +1229,258 @@ def build_request_modal(
             }
         ]
     }
+
+
+def build_create_secret_folder_select_modal(
+    shared_folders: List[Dict[str, Any]],
+    user_id: str
+) -> Dict[str, Any]:
+    """
+    Build modal for selecting a shared folder (Step 1 of create secret flow).
+    """
+    folder_options = []
+    for folder in shared_folders[:100]:
+        name = folder.get('name', 'Untitled')
+        uid = folder.get('uid', '')
+        if uid:
+            folder_options.append({
+                "text": {"type": "plain_text", "text": name[:75]},
+                "value": uid
+            })
+    
+    metadata = json.dumps({"user_id": user_id})
+    
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Create a new secret record*\n\nSelect the shared folder where you want to create the record."
+            }
+        },
+        {"type": "divider"},
+        {
+            "type": "input",
+            "block_id": "shared_folder_select",
+            "label": {"type": "plain_text", "text": "Shared Folder"},
+            "element": {
+                "type": "static_select",
+                "action_id": "shared_folder_choice",
+                "placeholder": {"type": "plain_text", "text": "Select a shared folder"},
+                "options": folder_options
+            }
+        }
+    ]
+    
+    return {
+        "type": "modal",
+        "callback_id": "create_secret_folder_select",
+        "private_metadata": metadata,
+        "title": {"type": "plain_text", "text": "Create Secret"},
+        "submit": {"type": "plain_text", "text": "Next"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks
+    }
+
+
+def build_create_secret_record_form_modal(
+    folder_name: str,
+    folder_uid: str,
+    user_id: str,
+    subfolders: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """
+    Build modal for entering record details (Step 2 of create secret flow).
+    Optionally includes a subfolder dropdown if subfolders exist.
+    """
+    metadata = json.dumps({
+        "user_id": user_id,
+        "folder_uid": folder_uid,
+        "folder_name": folder_name
+    })
+    
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Creating record in:* `{folder_name}`"
+            }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
+                }
+            ]
+        },
+        {"type": "divider"}
+    ]
+    
+    if subfolders:
+        subfolder_options = [
+            {
+                "text": {"type": "plain_text", "text": "(Parent folder)"},
+                "value": folder_uid
+            }
+        ]
+        for sf in subfolders[:99]:
+            path = sf.get('path', sf.get('name', 'Untitled'))
+            uid = sf.get('uid', '')
+            if uid:
+                subfolder_options.append({
+                    "text": {"type": "plain_text", "text": path[:75]},
+                    "value": uid
+                })
+        
+        blocks.append({
+            "type": "input",
+            "block_id": "subfolder_select",
+            "label": {"type": "plain_text", "text": "Subfolder"},
+            "element": {
+                "type": "static_select",
+                "action_id": "subfolder_choice",
+                "placeholder": {"type": "plain_text", "text": "Select a subfolder"},
+                "options": subfolder_options,
+                "initial_option": subfolder_options[0]
+            },
+            "optional": True
+        })
+    
+    blocks.extend([
+        {
+            "type": "input",
+            "block_id": "secret_title",
+            "label": {"type": "plain_text", "text": "Title"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "title_input",
+                "placeholder": {"type": "plain_text", "text": "Record title"}
+            }
+        },
+        {
+            "type": "input",
+            "block_id": "secret_login",
+            "label": {"type": "plain_text", "text": "Login"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "login_input",
+                "placeholder": {"type": "plain_text", "text": "Email or username"}
+            },
+            "optional": True
+        },
+        {
+            "type": "input",
+            "block_id": "auto_gen_password",
+            "label": {"type": "plain_text", "text": "Password Generation"},
+            "element": {
+                "type": "checkboxes",
+                "action_id": "auto_gen_checkbox",
+                "options": [
+                    {
+                        "text": {"type": "plain_text", "text": "\ud83c\udfb2 Auto-generate password"},
+                        "value": "auto_gen"
+                    }
+                ]
+            },
+            "optional": True
+        },
+        {
+            "type": "input",
+            "block_id": "secret_password",
+            "label": {"type": "plain_text", "text": "Password"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "password_input",
+                "placeholder": {"type": "plain_text", "text": "Enter password (or check auto-generate above)"}
+            },
+            "optional": True
+        },
+        {
+            "type": "input",
+            "block_id": "secret_url",
+            "label": {"type": "plain_text", "text": "Website Address"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "url_input",
+                "placeholder": {"type": "plain_text", "text": "https://"}
+            },
+            "optional": True
+        },
+        {
+            "type": "input",
+            "block_id": "secret_notes",
+            "label": {"type": "plain_text", "text": "Notes"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "notes_input",
+                "multiline": True,
+                "placeholder": {"type": "plain_text", "text": "Additional notes"}
+            },
+            "optional": True
+        },
+    ])
+    
+    return {
+        "type": "modal",
+        "callback_id": "create_secret_submit",
+        "private_metadata": metadata,
+        "title": {"type": "plain_text", "text": "Create Secret"},
+        "submit": {"type": "plain_text", "text": "Create Record"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks
+    }
+
+
+def post_create_secret_notification(
+    client,
+    approvals_channel: str,
+    user_id: str,
+    record_uid: str,
+    record_title: str,
+    folder_name: str,
+    subfolder_name: Optional[str] = None
+):
+    """
+    Post notification to admin channel when a user creates a secret record.
+    No sensitive data (password, login) is included.
+    """
+    folder_path = folder_name
+    if subfolder_name and subfolder_name != folder_name:
+        folder_path = f"{folder_name} / {subfolder_name}"
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "New Secret Record Created"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*User:*\n<@{user_id}>"},
+                {"type": "mrkdwn", "text": f"*Record UID:*\n`{record_uid}`"},
+                {"type": "mrkdwn", "text": f"*Title:*\n{record_title}"},
+                {"type": "mrkdwn", "text": f"*Folder:*\n{folder_path}"}
+            ]
+        },
+        {
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f"Created via `/keeper-create-secret` • {format_timestamp()}"
+            }]
+        }
+    ]
+    
+    try:
+        client.chat_postMessage(
+            channel=approvals_channel,
+            blocks=blocks,
+            text=f"User <@{user_id}> added record {record_uid} to {folder_path}",
+            unfurl_links=False,
+            unfurl_media=False
+        )
+    except Exception as e:
+        logger.error(f"Failed to post create secret notification: {e}")

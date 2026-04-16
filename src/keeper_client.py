@@ -1127,14 +1127,19 @@ class KeeperClient:
         url: Optional[str] = None,
         notes: Optional[str] = None,
         generate_password: bool = False,
-        self_destruct_duration: Optional[str] = None
+        self_destruct_duration: Optional[str] = None,
+        folder_uid: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create a new record in Keeper vault using the 'record-add' command.
+        Optionally place it in a specific folder via folder_uid.
         """
         try:
             # Build the record-add command
             command_parts = ["record-add"]
+            
+            if folder_uid:
+                command_parts.append(f"--folder {shlex.quote(folder_uid)}")
             
             # Add record type (lowercase, space-separated, no quotes)
             command_parts.append('--record-type login')
@@ -1192,57 +1197,78 @@ class KeeperClient:
                 }
             
             if result_data.get('status') == 'success':
-                # record-add doesn't return the UID, so we need to search for it
                 logger.info("Record created successfully, searching for UID...")
+                logger.debug(f"record-add response: {result_data}")
                 
-                # Extract message for self-destruct URL (if applicable)
-                message = result_data.get('message', '')
-                if isinstance(message, list):
-                    message = '\n'.join(message)
+                # Try to extract UID directly from record-add response
+                record_uid = result_data.get('uid') or result_data.get('record_uid')
                 
-                # Search for the newly created record by exact title
-                import time
-                time.sleep(1)  
+                # Check message/data fields for UID
+                if not record_uid:
+                    data = result_data.get('data')
+                    if isinstance(data, dict):
+                        record_uid = data.get('uid') or data.get('record_uid')
+                    elif isinstance(data, str):
+                        record_uid = data.strip() if len(data.strip()) == 22 else None
                 
-                try:
-                    search_response = self.session.post(
-                        f'{self.base_url}/executecommand-async',
-                        json={"command": f'search {shlex.quote(title)} --format=json'},
-                        timeout=10
-                    )
+                # Check message field for UID pattern
+                if not record_uid:
+                    message = result_data.get('message', '')
+                    if isinstance(message, list):
+                        message = '\n'.join(message)
                     
-                    if search_response.status_code == 202:
-                        search_request_id = search_response.json().get('request_id')
-                        if search_request_id:
-                            search_result = self._poll_for_result(search_request_id, max_wait=10)
-                            
-                            if search_result and search_result.get('status') == 'success':
-                                # Parse search results
-                                data = search_result.get('data', [])
-                                if data and len(data) > 0:
-                                    # Get the most recently created record (first match)
-                                    newest_record = data[0]
-                                    record_uid = newest_record.get('uid')
-                                    
-                                    if record_uid:
-                                        generated_password = None
-                                        if generate_password and not password:
-                                            generated_password = "$GEN"
-                                        return {
-                                            'success': True,
-                                            'record_uid': record_uid,
-                                            'password': generated_password or password,
-                                            'title': title,
-                                            'self_destruct': bool(self_destruct_duration),
-                                            'self_destruct_duration': self_destruct_duration
-                                        }
-                except Exception as search_error:
-                    logger.error(f"Failed to search for created record: {search_error}")
-                    logger.warning("Record created but UID not found via search")
+                    import re
+                    uid_match = re.search(r'[A-Za-z0-9_-]{22}', message)
+                    if uid_match:
+                        record_uid = uid_match.group(0)
+                        logger.debug(f"Extracted UID from message: {record_uid}")
+                
+                # Fallback: search for the record by title
+                if not record_uid:
+                    import time
+                    time.sleep(2)
+                    
+                    try:
+                        search_response = self.session.post(
+                            f'{self.base_url}/executecommand-async',
+                            json={"command": f'search {shlex.quote(title)} --format=json'},
+                            timeout=10
+                        )
+                        
+                        if search_response.status_code == 202:
+                            search_request_id = search_response.json().get('request_id')
+                            if search_request_id:
+                                search_result = self._poll_for_result(search_request_id, max_wait=15)
+                                logger.debug(f"Search result: {search_result}")
+                                
+                                if search_result and search_result.get('status') == 'success':
+                                    search_data = search_result.get('data', [])
+                                    if search_data and len(search_data) > 0:
+                                        newest_record = search_data[0]
+                                        record_uid = newest_record.get('uid') or newest_record.get('record_uid')
+                    except Exception as search_error:
+                        logger.error(f"Failed to search for created record: {search_error}")
+                
+                if record_uid:
+                    generated_password = None
+                    if generate_password and not password:
+                        generated_password = "$GEN"
                     return {
-                        'success': False,
-                        'error': "Record created but UID could not be retrieved. The record exists in your vault but the approval flow cannot continue automatically."
+                        'success': True,
+                        'record_uid': record_uid,
+                        'password': generated_password or password,
+                        'title': title,
+                        'self_destruct': bool(self_destruct_duration),
+                        'self_destruct_duration': self_destruct_duration
                     }
+                
+                logger.warning("Record created but UID not found via search")
+                return {
+                    'success': True,
+                    'record_uid': 'Unknown',
+                    'title': title,
+                    'note': 'Record created but UID could not be retrieved.'
+                }
             else:
                 error_msg = result_data.get('message', 'Unknown error')
                 if isinstance(error_msg, list):
@@ -1260,6 +1286,131 @@ class KeeperClient:
                 'success': False,
                 'error': f"Error creating record: {str(e)}"
             }
+    
+    def get_user_shared_folders(self, user_email: str) -> List[Dict[str, Any]]:
+        """
+        Filters the report to only return folders where the user appears in the sharing list.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": "share-report -f --format=json"},
+                timeout=10
+            )
+
+            if response.status_code != 202:
+                logger.error(f"Failed to submit share-report command: {response.status_code}")
+                return []
+
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for share-report")
+                return []
+
+            result_data = self._poll_for_result(request_id, max_wait=30)
+
+            if not result_data:
+                logger.warning("share-report command timed out")
+                return []
+
+            status = result_data.get('status')
+            if status == 'error':
+                error_msg = result_data.get('message', 'Unknown error')
+                logger.error(f"share-report failed: {error_msg}")
+                return []
+
+            if status == 'success':
+                data = result_data.get('data', [])
+                if isinstance(data, list):
+                    seen_uids = set()
+                    folders = []
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        shared_to = item.get('Shared To', '')
+                        if shared_to.lower() != user_email.lower():
+                            continue
+                        uid = item.get('Folder UID', '')
+                        name = item.get('Folder Name', '')
+                        if uid and name and uid not in seen_uids:
+                            seen_uids.add(uid)
+                            folders.append({
+                                'uid': uid,
+                                'name': name,
+                                'type': 'shared_folder'
+                            })
+                    logger.debug(
+                        f"Retrieved {len(folders)} shared folder(s) for {user_email} "
+                        f"(filtered from {len(data)} total entries)"
+                    )
+                    return folders
+
+            return []
+
+        except Exception as e:
+            logger.error(f"Exception fetching user shared folders: {e}", exc_info=True)
+            return []
+
+    def list_subfolders(self, shared_folder_uid: str) -> List[Dict[str, Any]]:
+        """
+        List all subfolders (including nested) inside a shared folder
+        """
+        try:
+            command = f"tree -s -v {shlex.quote(shared_folder_uid)}"
+            
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": command},
+                timeout=10
+            )
+            
+            if response.status_code != 202:
+                logger.error(f"Failed to submit tree command: {response.status_code}")
+                return []
+            
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for tree command")
+                return []
+            
+            result_data = self._poll_for_result(request_id, max_wait=20)
+            
+            if not result_data:
+                logger.warning("tree command timed out")
+                return []
+            
+            status = result_data.get('status')
+            if status == 'error':
+                error_msg = result_data.get('message', 'Unknown error')
+                logger.error(f"tree command failed: {error_msg}")
+                return []
+            
+            if status == 'success':
+                data = result_data.get('data', {})
+                tree_items = data.get('tree', []) if isinstance(data, dict) else []
+                subfolders = []
+                for item in tree_items:
+                    if not isinstance(item, dict):
+                        continue
+                    uid = item.get('uid', '')
+                    name = item.get('name', '')
+                    path = item.get('path', name)
+                    if uid and name:
+                        subfolders.append({
+                            'uid': uid,
+                            'name': name,
+                            'path': path,
+                            'level': item.get('level', 0),
+                            'type': item.get('type', 'folder')
+                        })
+                logger.debug(f"Retrieved {len(subfolders)} subfolder(s) for {shared_folder_uid}")
+                return subfolders
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Exception listing subfolders: {e}", exc_info=True)
+            return []
     
     def sync_pedm_data(self) -> bool:
         """
