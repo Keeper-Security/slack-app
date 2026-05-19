@@ -108,7 +108,8 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
             return
 
         # Check if record is a PAM type (one-time-share cannot be created for PAM records)
-        if 'pam' in record_details.record_type.lower():
+        from ..utils import is_pam_record_type
+        if is_pam_record_type(record_details.record_type):
             logger.warning(f"One-time share requested for PAM record: {identifier} (type: {record_details.record_type})")
             respond(
                 text=f"*PAM Record Not Supported*\n\n"

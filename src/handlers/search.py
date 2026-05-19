@@ -55,8 +55,11 @@ def handle_search_records(body: Dict[str, Any], client, config, keeper_client):
         view_id = response["view"]["id"]
         
         # NOW do the slow search (can take as long as needed)
+        exclude_pam = action_data.get("type") == "one_time_share"
         logger.debug(f"Searching for records with query: '{query}'")
-        records = keeper_client.search_records(query, limit=20)
+        records = keeper_client.search_records(
+            query, limit=20, exclude_pam=exclude_pam
+        )
         logger.debug(f"Got {len(records)} records, updating modal...")
         
         # Update the modal with actual results
