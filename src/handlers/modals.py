@@ -76,8 +76,12 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         ack()
         
         # Run search
+        request_type = approval_data.get("type", "record")
+        exclude_pam = request_type == "one_time_share"
         if search_type == "record":
-            results = keeper_client.search_records(new_query, limit=20)
+            results = keeper_client.search_records(
+                new_query, limit=20, exclude_pam=exclude_pam
+            )
         else:
             results = keeper_client.search_folders(new_query, limit=20)
         
@@ -510,8 +514,12 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     logger.debug(f"Refining search with query: '{new_query}'")
     
     # Re-run search
+    request_type = approval_data.get("type", "record")
+    exclude_pam = request_type == "one_time_share"
     if search_type == "record":
-        results = keeper_client.search_records(new_query, limit=20)
+        results = keeper_client.search_records(
+            new_query, limit=20, exclude_pam=exclude_pam
+        )
     else:
         results = keeper_client.search_folders(new_query, limit=20)
     

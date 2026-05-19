@@ -19,6 +19,11 @@ from datetime import datetime
 from typing import Tuple, Optional
 
 
+def is_pam_record_type(record_type: str) -> bool:
+    """True if the record type is a PAM record (pamUser, pamMachine, etc.)."""
+    return bool(record_type) and 'pam' in record_type.lower()
+
+
 def is_running_in_docker() -> bool:
     """
     Check if the application is running inside a Docker container.

@@ -28,6 +28,7 @@ from .models import (
 )
 from .config import KeeperConfig
 from .logger import logger
+from .utils import is_pam_record_type
 
 
 class KeeperClient:
@@ -140,7 +141,12 @@ class KeeperClient:
         
         return sanitized.strip()
     
-    def search_records(self, query: str, limit: int = 20) -> List[KeeperRecord]:
+    def search_records(
+        self,
+        query: str,
+        limit: int = 20,
+        exclude_pam: bool = False,
+    ) -> List[KeeperRecord]:
         """
         Search for records using Service Mode search command with category filter.
         """
@@ -172,7 +178,9 @@ class KeeperClient:
             result_data = self._poll_for_result(request_id, max_wait=30)
             
             if result_data:
-                return self._parse_search_records_results(result_data, limit)
+                return self._parse_search_records_results(
+                    result_data, limit, exclude_pam=exclude_pam
+                )
             else:
                 logger.debug("Search command timed out or failed")
                 return []
@@ -886,7 +894,12 @@ class KeeperClient:
         logger.warning(f"Polling timed out after {max_wait} seconds")
         return None
     
-    def _parse_search_records_results(self, result_data: Dict, limit: int) -> List[KeeperRecord]:
+    def _parse_search_records_results(
+        self,
+        result_data: Dict,
+        limit: int,
+        exclude_pam: bool = False,
+    ) -> List[KeeperRecord]:
         """
         Parse search command results for records.
         """
@@ -922,8 +935,7 @@ class KeeperClient:
                         elif part.startswith('Description: '):
                             notes = part.replace('Description: ', '').strip()
                 
-                # Skip record type that contains "pam"
-                if 'pam' in record_type.lower():
+                if exclude_pam and is_pam_record_type(record_type):
                     logger.debug(f"Skipping record {uid} with PAM type: {record_type}")
                     continue
                 
