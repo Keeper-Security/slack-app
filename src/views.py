@@ -16,7 +16,7 @@ Slack UI builders using Block Kit.
 
 import json
 from typing import List, Dict, Any, Optional
-from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
+from .models import RequestType, PermissionLevel, KDPermissionRole, KeeperRecord, KeeperFolder
 from .utils import (
     format_timestamp,
     format_permission_name,
@@ -31,6 +31,48 @@ from .logger import logger
 
 # Default Keeper server domain
 DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
+
+
+def encode_search_item_value(uid: str, is_keeper_drive: bool) -> str:
+    """Encode record/folder UID and Keeper Drive flag for Slack option values."""
+    return json.dumps({"uid": uid, "kd": is_keeper_drive})
+
+
+def decode_search_item_value(value: str) -> tuple:
+    """Decode Slack option value into (uid, is_keeper_drive)."""
+    try:
+        payload = json.loads(value)
+        if isinstance(payload, dict):
+            return payload.get("uid", value), bool(payload.get("kd", False))
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return value, False
+
+
+def _item_is_keeper_drive(item: Any) -> bool:
+    if isinstance(item, dict):
+        return bool(item.get("is_keeper_drive", False))
+    return bool(getattr(item, "is_keeper_drive", False))
+
+
+def _item_uid(item: Any) -> str:
+    if isinstance(item, dict):
+        return item.get("uid", "")
+    if isinstance(item, KeeperRecord):
+        return item.uid
+    return item.uid
+
+
+def _item_title(item: Any) -> str:
+    if isinstance(item, dict):
+        return item.get("title") or item.get("name", "Untitled")
+    if isinstance(item, KeeperRecord):
+        return item.title
+    return item.name
+
+
+def _results_drive_flags(results: List[Any]) -> List[bool]:
+    return [_item_is_keeper_drive(item) for item in results[:10]]
 
 
 def post_approval_request(
@@ -259,12 +301,46 @@ def build_pam_rotate_on_expire_block(
 def build_permission_selector_block(
     request_type: RequestType,
     for_modal: bool = False,
+    is_keeper_drive: bool = False,
     initial_value: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build permission level selector block.
     """
-    if request_type == RequestType.ONE_TIME_SHARE:
+    label_text = "Select Permission Level"
+    permission_block_id = "permission_selector_kd" if is_keeper_drive else "permission_selector_classic"
+
+    if is_keeper_drive and request_type == RequestType.RECORD:
+        options = [
+            {"text": {"type": "plain_text", "text": "Viewer"}, "value": KDPermissionRole.VIEWER.value},
+            {"text": {"type": "plain_text", "text": "Share Manager"}, "value": KDPermissionRole.SHARE_MANAGER.value},
+            {"text": {"type": "plain_text", "text": "Content Manager"}, "value": KDPermissionRole.CONTENT_MANAGER.value},
+            {
+                "text": {"type": "plain_text", "text": "Content Share Manager"},
+                "value": KDPermissionRole.CONTENT_SHARE_MANAGER.value,
+            },
+            {"text": {"type": "plain_text", "text": "Full Manager"}, "value": KDPermissionRole.FULL_MANAGER.value},
+            {
+                "text": {"type": "plain_text", "text": "Transfer Ownership"},
+                "value": KDPermissionRole.TRANSFER_OWNER.value,
+            },
+        ]
+        initial_option = options[0]
+        label_text = "Select Keeper Drive Permission"
+    elif is_keeper_drive and request_type == RequestType.FOLDER:
+        options = [
+            {"text": {"type": "plain_text", "text": "Viewer"}, "value": KDPermissionRole.VIEWER.value},
+            {"text": {"type": "plain_text", "text": "Share Manager"}, "value": KDPermissionRole.SHARE_MANAGER.value},
+            {"text": {"type": "plain_text", "text": "Content Manager"}, "value": KDPermissionRole.CONTENT_MANAGER.value},
+            {
+                "text": {"type": "plain_text", "text": "Content Share Manager"},
+                "value": KDPermissionRole.CONTENT_SHARE_MANAGER.value,
+            },
+            {"text": {"type": "plain_text", "text": "Full Manager"}, "value": KDPermissionRole.FULL_MANAGER.value},
+        ]
+        initial_option = options[0]
+        label_text = "Select Keeper Drive Permission"
+    elif request_type == RequestType.ONE_TIME_SHARE:
         # One-time shares only support View Only and Can Edit
         options = [
             {
@@ -276,8 +352,8 @@ def build_permission_selector_block(
                 "value": PermissionLevel.CAN_EDIT.value
             }
         ]
-        default_index = 0  # "View Only" by default for one-time shares
-        initial_option = options[default_index]
+        initial_option = options[0]  # "View Only" by default for one-time shares
+        label_text = "Select Permission Level"
     elif request_type == RequestType.RECORD:
         options = [
             {
@@ -301,8 +377,8 @@ def build_permission_selector_block(
                 "value": PermissionLevel.CHANGE_OWNER.value
             }
         ]
-        default_index = 0  # "View Only" by default (minimum access)
-        initial_option = options[default_index]
+        initial_option = options[0]  # "View Only" by default (minimum access)
+        label_text = "Select Permission Level"
     else:  # FOLDER
         options = [
             {
@@ -335,11 +411,11 @@ def build_permission_selector_block(
         # Use input block for full-width dropdown (better display for long text in modals)
         return {
             "type": "input",
-            "block_id": "permission_selector",
+            "block_id": permission_block_id,
             "dispatch_action": True,  # Dispatch action immediately when selection changes
             "label": {
                 "type": "plain_text",
-                "text": "Select Permission Level"
+                "text": label_text
             },
             "element": {
                 "type": "static_select",
@@ -363,104 +439,6 @@ def build_permission_selector_block(
             }
         }
 
-def build_grant_processing_modal(
-    message: str = "Granting access and applying rotation settings...",
-) -> Dict[str, Any]:
-    return {
-        "type": "modal",
-        "callback_id": "grant_processing_modal",
-        "title": {"type": "plain_text", "text": "Granting Access..."},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f":hourglass_flowing_sand: *{message}*",
-                },
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "_This usually takes a few seconds. Please don't close this window._",
-                    }
-                ],
-            },
-        ],
-    }
-
-
-def build_grant_success_modal(
-    title_text: str,
-    detail_lines: List[str],
-) -> Dict[str, Any]:
-    """
-    Build a success confirmation modal shown after a deferred-ack grant flow
-    completes. Lets the admin dismiss the modal with a Close button.
-    """
-    text_lines = [f"*{title_text}*", ""] + detail_lines
-    return {
-        "type": "modal",
-        "callback_id": "grant_success_modal",
-        "title": {"type": "plain_text", "text": "Access Granted"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "\n".join(text_lines),
-                },
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "_The approval card and the requester have been notified._",
-                    }
-                ],
-            },
-        ],
-    }
-
-
-def build_grant_error_modal(
-    title_text: str,
-    message: str,
-    footer: str = "Please try again with different settings if needed, or contact the requester directly.",
-) -> Dict[str, Any]:
-    """
-    Build a generic error modal shown after a deferred-ack grant flow fails
-    with an error that does not have a tailored recovery flow.
-    """
-    return {
-        "type": "modal",
-        "callback_id": "grant_error_modal",
-        "title": {"type": "plain_text", "text": "Error"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": title_text},
-            },
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": message},
-            },
-            {"type": "divider"},
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": footer}
-                ],
-            },
-        ],
-    }
-
-
 def build_search_modal(
     query: str,
     search_type: str,
@@ -469,6 +447,7 @@ def build_search_modal(
     loading: bool = False,
     show_duration: bool = True,
     error_banner: Optional[str] = None,
+    selected_is_keeper_drive: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Build search results modal with interactive search.
@@ -490,26 +469,38 @@ def build_search_modal(
     
     # Cache results as serializable dicts (KeeperRecord/KeeperFolder objects can't be JSON serialized)
     # Only cache essential fields and limit to 10 to stay under Slack's private_metadata 3000 char limit
-    if results:
-        # Check if results are already dicts (from cached_results) or objects
-        if isinstance(results[0], dict):
-            metadata['cached_results'] = [
-                {
-                    'uid': r.get('uid', ''),
-                    'title': r.get('title', 'Untitled'),
-                    'record_type': r.get('record_type', ''),
-                }
-                for r in results[:10]
-            ]
+    drive_flags = _results_drive_flags(results) if results else []
+    is_mixed_results = len(set(drive_flags)) > 1 if drive_flags else False
+
+    # Explicit False is valid (Classic); only infer when the caller did not pass a selection.
+    selection_resolved = (
+        selected_is_keeper_drive is not None
+        or approval_data.get('selected_uid') is not None
+    )
+    if selected_is_keeper_drive is None:
+        if approval_data.get('selected_uid') is not None:
+            selected_is_keeper_drive = approval_data.get('selected_is_keeper_drive', False)
+        elif drive_flags and not is_mixed_results:
+            selected_is_keeper_drive = drive_flags[0]
         else:
-            metadata['cached_results'] = [
-                {
-                    'uid': r.uid,
-                    'title': r.title if hasattr(r, 'title') else r.name,
-                    'record_type': getattr(r, 'record_type', ''),
-                }
-                for r in results[:10]
-            ]
+            selected_is_keeper_drive = False
+
+    metadata['selected_is_keeper_drive'] = selected_is_keeper_drive
+    metadata['is_mixed_results'] = is_mixed_results
+
+    if results:
+        metadata['cached_results'] = [
+            {
+                'uid': _item_uid(r),
+                'title': _item_title(r),
+                'record_type': (
+                    r.get('record_type', '') if isinstance(r, dict)
+                    else getattr(r, 'record_type', '')
+                ),
+                'is_keeper_drive': _item_is_keeper_drive(r),
+            }
+            for r in results[:10]
+        ]
     else:
         metadata['cached_results'] = []
     
@@ -595,41 +586,39 @@ def build_search_modal(
         options = []
         initial_option = None  # Will be set if newly_created_uid or selected_uid matches
         newly_created_uid = approval_data.get('newly_created_uid')
-        selected_uid = approval_data.get('selected_uid')
+        active_selected_uid = approval_data.get('selected_uid')
         selected_record_is_pam_user = False
 
         for item in results[:10]:  # Limit to 10 for UX
-            # Handle both objects (KeeperRecord/KeeperFolder) and dicts (cached results)
-            if isinstance(item, dict):
-                # Cached result dict
-                text = f"{item.get('title', 'Untitled')} ({item.get('uid', '')})"
-                value = item.get('uid', '')
-                item_record_type = item.get('record_type', '')
-            elif isinstance(item, KeeperRecord):
-                text = f"{item.title} ({item.uid})"
-                value = item.uid
-                item_record_type = getattr(item, 'record_type', '')
-            else:  # KeeperFolder
-                text = f"{item.name} ({item.uid})"
-                value = item.uid
-                item_record_type = ''
-            
+            uid = _item_uid(item)
+            title = _item_title(item)
+            is_kd = _item_is_keeper_drive(item)
+            item_record_type = (
+                item.get('record_type', '') if isinstance(item, dict)
+                else getattr(item, 'record_type', '')
+            )
+            category_label = "KD" if is_kd else "Classic"
+            text = f"{title} ({uid}) [{category_label}]"
+            value = encode_search_item_value(uid, is_kd)
+
             option = {
-                "text": {"type": "plain_text", "text": text},
-                "value": value
+                "text": {"type": "plain_text", "text": text[:75]},
+                "value": value,
             }
             options.append(option)
-            
-            # Pre-select if this is the newly created record or the user just clicked it
-            if selected_uid and value == selected_uid:
+
+            # Pre-select newly created or user-selected record/folder. Track
+            # whether the selected record is a pamUser so the rotate checkbox
+            # can appear conditionally below.
+            if active_selected_uid and uid == active_selected_uid:
                 initial_option = option
                 if is_pam_user_record_type(item_record_type):
                     selected_record_is_pam_user = True
-            elif not selected_uid and newly_created_uid and value == newly_created_uid:
+            elif not active_selected_uid and newly_created_uid and uid == newly_created_uid:
                 initial_option = option
-        
+
         # If we have a newly created record, add context message
-        if initial_option and not selected_uid:
+        if initial_option and not active_selected_uid:
             blocks.insert(-1, {  # Insert before the last divider
                 "type": "context",
                 "elements": [{
@@ -642,7 +631,7 @@ def build_search_modal(
             "type": "input",
             "block_id": "selected_item",
             "label": {"type": "plain_text", "text": f"Select {search_type}:"},
-            "dispatch_action": True,  # Refresh modal on selection (for PAM rotate checkbox)
+            "dispatch_action": True,  # Refresh modal on selection (KD context + PAM rotate checkbox)
             "element": {
                 "type": "radio_buttons",
                 "action_id": "item_selection",
@@ -650,91 +639,118 @@ def build_search_modal(
             },
             "optional": False  # Make selection required
         }
-        
+
         # Add initial_option if we have a newly created record or current selection
         if initial_option:
             radio_block["element"]["initial_option"] = initial_option
             logger.info(
                 f"Pre-selecting record uid={initial_option['value']} "
-                f"(selected_uid={selected_uid}, newly_created_uid={newly_created_uid})"
+                f"(selected_uid={active_selected_uid}, newly_created_uid={newly_created_uid})"
             )
         else:
             logger.info(f"No pre-selection - newly_created_uid: {newly_created_uid}")
         
         blocks.append(radio_block)
+
+        if is_mixed_results and not selection_resolved:
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "_Results include Classic and Keeper Drive items. Select one to load the correct permission options._",
+                }],
+            })
         
-        # Only show permission and duration selectors if NOT creating self-destruct link
         if not approval_data.get('create_self_destruct', False):
             selected_permission = approval_data.get('selected_permission')
             selected_duration = approval_data.get('selected_duration')
             rotate_initial_checked = approval_data.get('rotate_initial_checked', True)
 
-            # Add permission selector (full-width for modal)
-            blocks.append(
-                build_permission_selector_block(
-                    request_type,
-                    for_modal=True,
-                    initial_value=selected_permission,
-                )
-            )
-            
-            # Add duration selector (conditionally based on permission)
-            if show_duration:
-                duration_options = get_duration_options()
-                duration_initial = {
-                    "text": {"type": "plain_text", "text": "1 hour"},
-                    "value": "1h",
-                }
-                if selected_duration:
-                    for opt in duration_options:
-                        if opt.get("value") == selected_duration:
-                            duration_initial = opt
-                            break
-                blocks.append({
-                    "type": "input",
-                    "block_id": "grant_duration",
-                    "label": {"type": "plain_text", "text": "Grant Access For"},
-                    "optional": True,
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "grant_duration_select",
-                        "options": duration_options,
-                        "initial_option": duration_initial,
-                    },
-                    "hint": {
-                        "type": "plain_text",
-                        "text": "Select how long the access should remain active"
-                    }
-                })
-                if (
-                    search_type == "record"
-                    and request_type != RequestType.ONE_TIME_SHARE
-                    and selected_record_is_pam_user
-                ):
-                    blocks.append(
-                        build_pam_rotate_on_expire_block(
-                            for_modal=True,
-                            initial_checked=rotate_initial_checked,
-                        )
-                    )
+            show_permission_controls = not is_mixed_results or selection_resolved
+            if show_permission_controls:
+                # Context badge for KD vs Classic mode
+                if selected_is_keeper_drive:
                     blocks.append({
                         "type": "context",
                         "elements": [{
                             "type": "mrkdwn",
-                            "text": "_Selected PAM User record: credentials rotate when time-limited access expires (rotation must be configured on the record)._",
+                            "text": ":file_folder: *Keeper Drive* — role-based permissions",
                         }],
                     })
-            else:
-                # Show permanent access notice
-                blocks.append({
-                    "type": "context",
-                    "elements": [{
-                        "type": "mrkdwn",
-                        "text": "ℹ️ *Permanent Access:* The selected permission does not support time limits."
-                    }]
-                })
+                else:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": ":key: *Classic vault* — standard share permissions",
+                        }],
+                    })
+
+                blocks.append(build_permission_selector_block(
+                    request_type,
+                    for_modal=True,
+                    is_keeper_drive=selected_is_keeper_drive,
+                    initial_value=selected_permission,
+                ))
+
+                if show_duration:
+                    duration_options = get_duration_options()
+                    duration_initial = {
+                        "text": {"type": "plain_text", "text": "1 hour"},
+                        "value": "1h",
+                    }
+                    if selected_duration:
+                        for opt in duration_options:
+                            if opt.get("value") == selected_duration:
+                                duration_initial = opt
+                                break
+                    blocks.append({
+                        "type": "input",
+                        "block_id": "grant_duration",
+                        "label": {"type": "plain_text", "text": "Grant Access For"},
+                        "optional": True,
+                        "element": {
+                            "type": "static_select",
+                            "action_id": "grant_duration_select",
+                            "options": duration_options,
+                            "initial_option": duration_initial,
+                        },
+                        "hint": {
+                            "type": "plain_text",
+                            "text": "Select how long the access should remain active"
+                        }
+                    })
+                    # PAM rotate-on-expire checkbox: only for Classic pamUser
+                    # records (KD does not support credential rotation via
+                    # share-record).
+                    if (
+                        search_type == "record"
+                        and request_type != RequestType.ONE_TIME_SHARE
+                        and selected_record_is_pam_user
+                        and not selected_is_keeper_drive
+                    ):
+                        blocks.append(
+                            build_pam_rotate_on_expire_block(
+                                for_modal=True,
+                                initial_checked=rotate_initial_checked,
+                            )
+                        )
+                        blocks.append({
+                            "type": "context",
+                            "elements": [{
+                                "type": "mrkdwn",
+                                "text": "_Selected PAM User record: credentials rotate when time-limited access expires (rotation must be configured on the record)._",
+                            }],
+                        })
+                else:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": "ℹ️ *Permanent Access:* The selected permission does not support time limits."
+                        }]
+                    })
         else:
-            # Self-destruct mode - show info message instead
             duration_text = approval_data.get('self_destruct_duration', 'N/A')
             blocks.append({
                 "type": "section",
@@ -803,18 +819,155 @@ def build_search_modal(
     
     return modal_config
 
-def build_create_record_modal(approval_data: Dict[str, Any], original_query: str = "", show_expiration: bool = False) -> Dict[str, Any]:
+
+def build_approval_processing_modal(
+    approval_id: str,
+    item_title: str,
+    request_type: str,
+) -> Dict[str, Any]:
+    """Modal shown while Commander grants access (after Approve is clicked)."""
+    item_label = "Record" if request_type == "record" else "Folder"
+    if request_type == "one_time_share":
+        item_label = "Record"
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Approving Request"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":hourglass_flowing_sand: *Processing approval...*\n\n"
+                        f"*Request ID:* `{approval_id}`\n"
+                        f"*{item_label}:* {item_title}\n\n"
+                        "Granting access in Keeper. Please wait."
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "_This may take a few seconds._",
+                }],
+            },
+        ],
+    }
+
+
+def build_approval_success_modal(
+    approval_id: str,
+    item_title: str,
+    request_type: str,
+    permission_display: str,
+    expires_at: str,
+    invitation_sent: bool = False,
+    rotate_on_expire: bool = False,
+) -> Dict[str, Any]:
+    """Modal shown after access was granted successfully."""
+    if invitation_sent:
+        body = (
+            "*Invitation Sent*\n\n"
+            f"*Request ID:* `{approval_id}`\n"
+            f"*Item:* {item_title}\n"
+            f"*Permission:* {format_permission_name(permission_display)}\n\n"
+            "The user is not in the vault yet. They must accept the invitation "
+            "before they can access this item."
+        )
+        title = "Invitation Sent"
+    elif request_type == "one_time_share":
+        body = (
+            "*One-Time Share Created*\n\n"
+            f"*Request ID:* `{approval_id}`\n"
+            f"*Record:* {item_title}\n"
+            f"*Expires:* {expires_at}\n\n"
+            "The share link was sent to the requester."
+        )
+        title = "Share Link Created"
+    else:
+        item_label = "Record" if request_type == "record" else "Folder"
+        body = (
+            "*Access Granted*\n\n"
+            f"*Request ID:* `{approval_id}`\n"
+            f"*{item_label}:* {item_title}\n"
+            f"*Permission:* {format_permission_name(permission_display)}\n"
+            f"*Expires:* {expires_at}\n\n"
+            "The requester has been notified."
+        )
+        if rotate_on_expire:
+            body += (
+                "\n\n:arrows_counterclockwise: *PAM credentials will rotate "
+                "when access expires.*"
+            )
+        title = "Access Granted"
+
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": title},
+        "close": {"type": "plain_text", "text": "Done"},
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
+    }
+
+
+def build_approval_error_modal(
+    approval_id: str,
+    item_title: str,
+    error_msg: str,
+    request_type: str = "record",
+) -> Dict[str, Any]:
+    """Modal shown when approval/grant fails."""
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Approval Failed"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Could not grant access*\n\n"
+                        f"*Request ID:* `{approval_id}`\n"
+                        f"*Item:* {item_title}\n\n"
+                        f"{error_msg}"
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "_You can adjust permissions and try again from the approval channel._",
+                }],
+            },
+        ],
+    }
+
+
+def build_create_record_modal(
+    approval_data: Dict[str, Any],
+    original_query: str = "",
+    show_expiration: bool = False,
+    use_classic: bool = False,
+) -> Dict[str, Any]:
     """
     Build modal for creating a new record.
     After creation, will return to search modal with new record pre-selected.
+    use_classic: when True uses record-add; when False uses kd-record-add (default).
     """
+    is_kd = not use_classic
+
     blocks = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Creating record for:* <@{approval_data.get('requester_id')}>\n_After creation, you'll be able to review and approve sharing_"
-                }
+                    "text": (
+                        f"*Creating record for:* <@{approval_data.get('requester_id')}>\n"
+                        "_After creation, you'll be able to review and approve sharing_"
+                    ),
+                },
             },
             {
                 "type": "context",
@@ -825,6 +978,38 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                     }
                 ]
             },
+            {"type": "divider"},
+            {
+                "type": "input",
+                "block_id": "classic_vault",
+                "dispatch_action": True,
+                "label": {"type": "plain_text", "text": "Vault Type"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "classic_vault_checkbox",
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "Use Classic permission model"},
+                            "value": "classic",
+                        },
+                    ],
+                    **({"initial_options": [{
+                        "text": {"type": "plain_text", "text": "Use Classic permission model"},
+                        "value": "classic",
+                    }]} if use_classic else {}),
+                },
+                "optional": True,
+            },
+        ]
+    if is_kd:
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_Unchecked = Keeper Drive record. Self-destruct is Classic only._",
+            }],
+        })
+    blocks.extend([
             {"type": "divider"},
             {
                 "type": "input",
@@ -917,8 +1102,8 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 },
                 "optional": True
             },
-            {"type": "divider"}
-    ]
+            {"type": "divider"},
+    ])
     
     checkbox_block = {
         "type": "actions",
@@ -946,10 +1131,11 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
             }
         ]
     
-    blocks.append(checkbox_block)
+    if not is_kd:
+        blocks.append(checkbox_block)
     
-    # Conditionally add expiration dropdown only if checkbox is checked
-    if show_expiration:
+    # Conditionally add expiration dropdown only if checkbox is checked (Classic only)
+    if show_expiration and not is_kd:
         blocks.append({
             "type": "input",
             "block_id": "link_expiration",

@@ -354,7 +354,14 @@ def format_permission_name(permission: str) -> str:
         'no_permissions': 'No User Permissions',
         'manage_users': 'Can Manage Users',
         'manage_records': 'Can Manage Records',
-        'manage_all': 'Can Manage Records and Users'
+        'manage_all': 'Can Manage Records and Users',
+        # Keeper Drive roles
+        'viewer': 'Viewer',
+        'share-manager': 'Share Manager',
+        'content-manager': 'Content Manager',
+        'content-share-manager': 'Content Share Manager',
+        'full-manager': 'Full Manager',
+        'owner': 'Transfer Ownership',
     }
     return mappings.get(permission, permission.replace('_', ' ').title())
 

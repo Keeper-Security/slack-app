@@ -15,10 +15,12 @@
 import json
 import requests
 from typing import Dict, Any
-from ..models import PermissionLevel, RequestType
+from ..models import PermissionLevel, KDPermissionRole, RequestType
+from ..views import decode_search_item_value
 from ..views import update_approval_message, send_access_granted_dm, post_approval_request
 from ..utils import (
-    parse_duration_to_seconds, format_duration, get_user_email_from_slack,
+    parse_duration_to_seconds, format_duration, format_permission_name,
+    get_user_email_from_slack,
     generate_approval_id, is_valid_uid, sanitize_user_input,
     MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
     is_record_owner_error, is_permission_conflict_error
@@ -45,47 +47,6 @@ def _send_ephemeral_response(response_url: str, text: str) -> bool:
         return False
 
 
-def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_client) -> None:
-    """
-    Refresh the search modal when the user selects a result so the PAM rotate
-    checkbox can appear only for PAM records.
-    """
-    try:
-        view = body.get("view") or {}
-        view_id = view.get("id")
-        if not view_id:
-            return
-
-        metadata_raw = view.get("private_metadata", "{}")
-        try:
-            metadata = json.loads(metadata_raw)
-        except json.JSONDecodeError:
-            logger.warning("item_selection: could not parse private_metadata")
-            return
-
-        selected_option = body.get("actions", [{}])[0].get("selected_option") or {}
-        selected_uid = selected_option.get("value")
-        if not selected_uid:
-            return
-
-        metadata["selected_uid"] = selected_uid
-
-        from ..views import build_search_modal
-
-        updated_modal = build_search_modal(
-            query=metadata.get("query", ""),
-            search_type=metadata.get("search_type", "record"),
-            results=metadata.get("cached_results", []),
-            approval_data=metadata,
-            loading=False,
-        )
-
-        client.views_update(view_id=view_id, view=updated_modal)
-        logger.debug(f"item_selection: refreshed modal for selected_uid={selected_uid}")
-    except Exception as exc:
-        logger.error(f"item_selection handler error: {exc}")
-
-
 def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper_client):
     """
     Handle search modal submission.
@@ -93,13 +54,14 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     """
     # Extract approval data from private metadata
     approval_data = json.loads(body["view"]["private_metadata"])
+    request_type = approval_data.get("type", approval_data.get("search_type", "record"))
     
     # Extract values from form
     values = body["view"]["state"]["values"]
     
     # Check if user modified search query
     new_query = values.get("search_query", {}).get("update_search_query", {}).get("value", "").strip()
-    search_type = approval_data.get("search_type", approval_data.get("type", "record"))
+    search_type = approval_data.get("search_type", request_type)
     
     logger.debug(f"Modal submit - new_query: '{new_query}', search_type: {search_type}")
     
@@ -118,6 +80,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
 
         # Drop any prior selection when running a new search
         approval_data.pop("selected_uid", None)
+        approval_data.pop("selected_is_keeper_drive", None)
         
         # Run search
         request_type = approval_data.get("type", "record")
@@ -173,44 +136,47 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         })
         return
     
-    # Item selected - acknowledge IMMEDIATELY (Slack requires ack within 3 seconds).
-    pre_ack_request_type = approval_data.get("type", "record")
-    pre_ack_is_self_destruct = approval_data.get("create_self_destruct", False)
-    defer_ack = (
-        pre_ack_request_type == "record"
-        and not pre_ack_is_self_destruct
-        and bool(values.get("pam_rotate_block"))
-    )
-    submitted_view_id = body["view"]["id"]
-
-    if defer_ack:
-        from ..views import build_grant_processing_modal
-        ack(
-            response_action="update",
-            view=build_grant_processing_modal(),
-        )
-        logger.debug(
-            "Deferred ack with processing modal (rotate checkbox in scope); "
-            f"view_id={submitted_view_id}"
-        )
-    else:
-        ack()
-
-    selected_uid = selected_item["value"]
+    # KD's universal deferred-ack pattern handles both PAM rotate-on-expire
+    # and Keeper Drive flows: we always ack with a "Processing..." view (see
+    # build_approval_processing_modal below) so the modal stays open past
+    # Slack's 3-second window and we can swap it via views_update with the
+    # final success/error/retry view once the backend call returns.
+    selected_uid, is_keeper_drive = decode_search_item_value(selected_item["value"])
     
     # Get record title from the selected item or metadata
     record_title = selected_item.get("text", {}).get("text", "").split(" (")[0] if selected_item else f"Record {selected_uid}"
     if not record_title or record_title.startswith("Record "):
         record_title = approval_data.get('newly_created_title', approval_data.get('record_title', f"Record {selected_uid}"))
     
+    approval_id = approval_data["approval_id"]
+    from ..views import (
+        build_approval_processing_modal,
+        build_approval_success_modal,
+        build_approval_error_modal,
+    )
+
+    ack(response_action="update", view=build_approval_processing_modal(
+        approval_id=approval_id,
+        item_title=record_title,
+        request_type=request_type,
+    ))
+    view_id = body["view"]["id"]
+
+    def _show_modal_result(view: Dict[str, Any]) -> None:
+        try:
+            client.views_update(view_id=view_id, view=view)
+        except Exception as update_err:
+            logger.error(f"Failed to update approval modal: {update_err}")
+    
     # Check if this is a self-destruct record
     is_self_destruct = approval_data.get('create_self_destruct', False)
-    
+    permission_display = PermissionLevel.VIEW_ONLY.value
     # Extract permission and duration
     if is_self_destruct:
         # Self-destruct records: use duration from creation, always view-only
         logger.info("Self-destruct record detected - sharing with view-only access")
         permission = PermissionLevel.VIEW_ONLY
+        permission_display = PermissionLevel.VIEW_ONLY.value
         self_destruct_duration_str = approval_data.get('self_destruct_duration', '1h')
         duration_seconds = parse_duration_to_seconds(self_destruct_duration_str)
         duration_value = self_destruct_duration_str
@@ -218,23 +184,43 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         editable = False
     else:
         # Normal records: use admin-selected permission and duration
-        permission_block = values.get("permission_selector", {}).get("select_permission", {})
-        permission_value = permission_block.get("selected_option", {}).get("value", "view_only")
-        permission = PermissionLevel(permission_value)
+        permission_state = (
+            values.get("permission_selector_kd")
+            or values.get("permission_selector_classic")
+            or values.get("permission_selector", {})
+        )
+        permission_block = permission_state.get("select_permission", {})
+        if is_keeper_drive:
+            default_permission = "viewer"
+        elif request_type == "folder":
+            default_permission = PermissionLevel.NO_PERMISSIONS.value
+        else:
+            default_permission = PermissionLevel.VIEW_ONLY.value
+        permission_value = permission_block.get("selected_option", {}).get("value", default_permission)
+        permission = None
+        kd_role = None
+
+        if is_keeper_drive and request_type in ("record", "folder"):
+            kd_role = KDPermissionRole(permission_value)
+            permission_display = permission_value  # human-readable via format_permission_name in UI
+        else:
+            permission = PermissionLevel(permission_value)
+            permission_display = permission_value
         
         # For one-time shares, convert permission to editable flag
         editable = (permission_value == PermissionLevel.CAN_EDIT.value)
         
         # Some permissions are always permanent (no duration)
-        PERMANENT_ONLY_PERMISSIONS = [
-            # Record permissions (permanent)
-            PermissionLevel.CAN_SHARE.value,
-            PermissionLevel.EDIT_AND_SHARE.value,
-            PermissionLevel.CHANGE_OWNER.value,
-            # Folder permissions (permanent)
-            PermissionLevel.MANAGE_USERS.value,
-            PermissionLevel.MANAGE_ALL.value
-        ]
+        if is_keeper_drive and request_type in ("record", "folder"):
+            PERMANENT_ONLY_PERMISSIONS = [KDPermissionRole.TRANSFER_OWNER.value]
+        else:
+            PERMANENT_ONLY_PERMISSIONS = [
+                PermissionLevel.CAN_SHARE.value,
+                PermissionLevel.EDIT_AND_SHARE.value,
+                PermissionLevel.CHANGE_OWNER.value,
+                PermissionLevel.MANAGE_USERS.value,
+                PermissionLevel.MANAGE_ALL.value,
+            ]
         
         if permission_value in PERMANENT_ONLY_PERMISSIONS:
             # Force permanent access for these permissions
@@ -268,12 +254,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     approver_id = body["user"]["id"]
     approver_name = body["user"]["name"]
     
-    # Grant access
     requester_id = approval_data["requester_id"]
-    request_type = approval_data["type"]
-    approval_id = approval_data["approval_id"]
-    
-    # Get user's real email from Slack
     user_email = get_user_email_from_slack(client, requester_id)
 
     rotate_on_expire = False
@@ -293,20 +274,36 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     
     try:
         if request_type == "record":
-            result = keeper_client.grant_record_access(
-                record_uid=selected_uid,
-                user_email=user_email,
-                permission=permission,
-                duration_seconds=duration_seconds,
-                rotate_on_expire=rotate_on_expire,
-            )
+            if is_keeper_drive:
+                result = keeper_client.grant_kd_record_access(
+                    record_uid=selected_uid,
+                    user_email=user_email,
+                    role=kd_role,
+                    duration_seconds=duration_seconds,
+                )
+            else:
+                result = keeper_client.grant_record_access(
+                    record_uid=selected_uid,
+                    user_email=user_email,
+                    permission=permission,
+                    duration_seconds=duration_seconds,
+                    rotate_on_expire=rotate_on_expire,
+                )
         elif request_type == "folder":
-            result = keeper_client.grant_folder_access(
-                folder_uid=selected_uid,
-                user_email=user_email,
-                permission=permission,
-                duration_seconds=duration_seconds
-            )
+            if is_keeper_drive:
+                result = keeper_client.grant_kd_folder_access(
+                    folder_uid=selected_uid,
+                    user_email=user_email,
+                    role=kd_role,
+                    duration_seconds=duration_seconds,
+                )
+            else:
+                result = keeper_client.grant_folder_access(
+                    folder_uid=selected_uid,
+                    user_email=user_email,
+                    permission=permission,
+                    duration_seconds=duration_seconds,
+                )
         elif request_type == "one_time_share":
             # Create one-time share link with editable permission
             result = keeper_client.create_one_time_share(
@@ -318,7 +315,6 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             result = {'success': False, 'error': f'Unknown request type: {request_type}'}
         
         if result.get('success'):
-            # Modal already closed via early ack()
             from ..views import send_share_link_dm
             from ..utils import handle_invitation_sent
             
@@ -335,9 +331,17 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     requester_id=requester_id,
                     request_type=request_type,
                     identifier=selected_uid,
-                    permission_value=permission.value,
+                    permission_value=permission_display,
                     approval_id=approval_id
                 )
+                _show_modal_result(build_approval_success_modal(
+                    approval_id=approval_id,
+                    item_title=record_title,
+                    request_type=request_type,
+                    permission_display=permission_display,
+                    expires_at=result.get('expires_at', 'Pending Invitation'),
+                    invitation_sent=True,
+                ))
                 return
             
             # Send appropriate DM based on request type
@@ -364,7 +368,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                                 f"*Request ID:* `{approval_id}`\n" \
                                 f"*{item_label}:* {record_title}\n" \
                                 f"*{item_label} Link:* <{deep_link}|Open in Vault>\n" \
-                                f"*Permission:* {permission.value}\n" \
+                                f"*Permission:* {format_permission_name(permission_display)}\n" \
                                 f"*Expires:* {result.get('expires_at', duration_text)}"
                 
                 # Add self-destruct notice if applicable
@@ -465,33 +469,14 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             else:
                 logger.warning("No message_ts found in approval_data, cannot update card")
 
-            # If we deferred the ack, the modal is still open showing
-            if defer_ack:
-                try:
-                    from ..views import build_grant_success_modal
-                    success_title = "Access granted successfully"
-                    detail_lines = [
-                        f"*Request ID:* `{approval_id}`",
-                        f"*Record:* {record_title}",
-                        f"*Permission:* {permission.value}",
-                        f"*Expires:* {result.get('expires_at', duration_text)}",
-                    ]
-                    if result.get('rotate_on_expire'):
-                        detail_lines.append(
-                            ":arrows_counterclockwise: *PAM credentials will rotate when access expires.*"
-                        )
-                    client.views_update(
-                        view_id=submitted_view_id,
-                        view=build_grant_success_modal(
-                            title_text=success_title,
-                            detail_lines=detail_lines,
-                        ),
-                    )
-                except Exception as update_error:
-                    logger.warning(
-                        f"Failed to update modal with success view: {update_error}"
-                    )
-
+            _show_modal_result(build_approval_success_modal(
+                approval_id=approval_id,
+                item_title=record_title,
+                request_type=request_type,
+                permission_display=permission_display,
+                expires_at=result.get('expires_at', duration_text),
+                rotate_on_expire=bool(result.get('rotate_on_expire')),
+            ))
             logger.info(f"Access granted successfully for {approval_id}")
         else:
             # Failed to grant access
@@ -499,13 +484,17 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             error_code = result.get('error_code')
             logger.error(f"Failed to grant access: {error_msg}")
 
-            # PAM rotation not configured: keep modal experience, reopen with banner + state
+            # PAM rotation not configured: keep modal experience, show retry view
+            # with banner + preserved state so the admin can uncheck rotation
+            # and re-submit without leaving the modal.
             if error_code == 'pam_rotation_not_configured':
                 from ..views import build_search_modal
                 cached_results = approval_data.get('cached_results', [])
                 retry_approval_data = dict(approval_data)
                 retry_approval_data['selected_uid'] = selected_uid
-                retry_approval_data['selected_permission'] = permission.value
+                retry_approval_data['selected_is_keeper_drive'] = is_keeper_drive
+                if permission is not None:
+                    retry_approval_data['selected_permission'] = permission.value
                 if duration_seconds and duration_value not in (None, 'permanent'):
                     retry_approval_data['selected_duration'] = duration_value
                 retry_approval_data['rotate_initial_checked'] = False
@@ -521,37 +510,20 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         "*Rotate credentials when access expires* unchecked and approve again."
                     ),
                 )
-                try:
-                    if defer_ack:
-                        # Replace the still-open processing modal in place.
-                        # view_id stays valid long after trigger_id expires.
-                        client.views_update(
-                            view_id=submitted_view_id,
-                            view=retry_modal,
-                        )
-                        logger.info(
-                            f"Approval {approval_id}: updated open search modal with "
-                            "rotation-not-configured banner via views_update"
-                        )
-                    else:
-                        client.views_open(
-                            trigger_id=body.get("trigger_id"),
-                            view=retry_modal,
-                        )
-                        logger.info(
-                            f"Approval {approval_id}: reopened search modal with "
-                            "rotation-not-configured banner"
-                        )
-                except Exception as modal_error:
-                    logger.warning(
-                        f"Could not present search modal for rotation error: {modal_error}"
-                    )
-                    from ..utils import send_error_dm
-                    send_error_dm(
-                        client, approver_id, "Rotation Not Configured", error_msg
-                    )
+                _show_modal_result(retry_modal)
+                logger.info(
+                    f"Approval {approval_id}: showed search modal with "
+                    "rotation-not-configured banner via views_update"
+                )
                 return
             
+            _show_modal_result(build_approval_error_modal(
+                approval_id=approval_id,
+                item_title=record_title,
+                error_msg=error_msg,
+                request_type=request_type,
+            ))
+
             # Check if user is the record owner
             if is_record_owner_error(error_msg):
                 logger.info(f"User is record owner for approval {approval_id}, sending DM to approver")
@@ -564,7 +536,6 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                             f"*Request ID:* `{approval_id}`\n"
                             f"*{request_type.capitalize()}:* {record_title}"
                 )
-                # Update the approval card to show it's invalid
                 if "channel_id" in approval_data and "message_ts" in approval_data:
                     try:
                         from ..views import update_approval_message
@@ -577,9 +548,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         )
                     except Exception as update_error:
                         logger.debug(f"Could not update approval card: {update_error}")
-            # Check if this is a permission conflict error
             elif is_permission_conflict_error(error_msg):
-                # Permission conflict - don't update card, send DM to approver
                 logger.info(f"Permission conflict detected for approval {approval_id}, sending DM to approver")
                 from ..utils import send_error_dm
                 send_error_dm(
@@ -593,7 +562,6 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                             f"then try approving again from the approval channel."
                 )
             else:
-                # Other error - update the approval card with error status
                 if "channel_id" in approval_data and "message_ts" in approval_data:
                     try:
                         from ..views import update_approval_message
@@ -606,61 +574,73 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                         )
                     except Exception as update_error:
                         logger.error(f"Failed to update approval card: {update_error}")
-                
-                # Show error to approver via modal or DM
-                try:
-                    from ..views import build_grant_error_modal
-                    error_view = build_grant_error_modal(
-                        title_text="Failed to Grant Access",
-                        message=error_msg,
-                    )
-                    if defer_ack:
-                        # Processing modal is still open - swap it in place.
-                        client.views_update(
-                            view_id=submitted_view_id,
-                            view=error_view,
-                        )
-                    else:
-                        client.views_open(
-                            trigger_id=body.get("trigger_id"),
-                            view=error_view,
-                        )
-                except Exception as modal_error:
-                    # If we can't open/update a modal (trigger_id expired or
-                    # view_id invalid), send DM to approver
-                    logger.warning(f"Could not show error modal: {modal_error}")
-                    from ..utils import send_error_dm
-                    send_error_dm(client, approver_id, "Failed to Grant Access", error_msg)
+                # Note: the in-modal error view was already shown above via
+                # _show_modal_result(build_approval_error_modal(...)).
             
     except Exception as e:
         logger.error(f"Error granting access from search modal: {e}")
         import traceback
         traceback.print_exc()
 
-        # If we deferred the ack, the modal is still showing "Processing..."
-        # Replace it with an error view so the admin isn't stuck.
-        if defer_ack:
-            try:
-                from ..views import build_grant_error_modal
-                client.views_update(
-                    view_id=submitted_view_id,
-                    view=build_grant_error_modal(
-                        title_text="System Error",
-                        message=f"An error occurred while processing your approval: {str(e)}",
-                    ),
-                )
-            except Exception as inner_modal_error:
-                logger.warning(
-                    f"Could not update modal after unexpected error: {inner_modal_error}"
-                )
-
-        # Always also send a DM as a durable record/fallback.
+        # Replace the still-open processing modal with an error view so the
+        # admin is not stuck looking at "Processing...".
+        try:
+            _show_modal_result(build_approval_error_modal(
+                approval_id=approval_id,
+                item_title=record_title,
+                error_msg=f"An error occurred while processing your approval: {str(e)}",
+                request_type=request_type,
+            ))
+        except Exception as inner_modal_error:
+            logger.warning(
+                f"Could not update modal after unexpected error: {inner_modal_error}"
+            )
+        # Also DM the approver as a durable fallback.
         from ..utils import send_error_dm
         send_error_dm(
             client, body["user"]["id"],
             "System Error",
             f"An error occurred while processing your approval: {str(e)}"
         )
+
+def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle record/folder radio selection in the search modal.
+
+    Refreshes the modal so that:
+    - Permission options reflect Classic vs Keeper Drive context, and
+    - The PAM rotate-on-expiration checkbox appears only when a `pamUser`
+      record is selected.
+    """
+    try:
+        selected = body["actions"][0].get("selected_option")
+        if not selected:
+            return
+
+        selected_uid, is_keeper_drive = decode_search_item_value(selected["value"])
+        view = body["view"]
+        metadata = json.loads(view["private_metadata"])
+        metadata["selected_uid"] = selected_uid
+        metadata["selected_is_keeper_drive"] = is_keeper_drive
+
+        from ..views import build_search_modal
+
+        updated_modal = build_search_modal(
+            query=metadata.get("query", ""),
+            search_type=metadata.get("search_type", "record"),
+            results=metadata.get("cached_results", []),
+            approval_data=metadata,
+            selected_is_keeper_drive=is_keeper_drive,
+        )
+
+        client.views_update(view_id=view["id"], view=updated_modal)
+        logger.info(
+            f"Search modal updated for selection uid={selected_uid}, keeper_drive={is_keeper_drive}"
+        )
+    except Exception as exc:
+        logger.error(f"item_selection handler error: {exc}")
+
+
 
 
 def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_client):
@@ -681,6 +661,7 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
 
     # Drop any prior selection when running a new search
     approval_data.pop("selected_uid", None)
+    approval_data.pop("selected_is_keeper_drive", None)
     
     # Re-run search
     request_type = approval_data.get("type", "record")
@@ -713,29 +694,63 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
         logger.error(f"Error updating search modal: {e}")
 
 
+def _is_classic_vault_checked(values: Dict[str, Any]) -> bool:
+    """True if Classic vault checkbox is selected in create-record modal."""
+    selected = values.get("classic_vault", {}).get("classic_vault_checkbox", {}).get("selected_options", [])
+    return any(opt.get("value") == "classic" for opt in selected)
+
+
 def handle_create_new_record_action(body: Dict[str, Any], client, config, keeper_client):
     """
     Handle 'Create New Record' button click in search modal.
-    Opens a modal for creating a new record.
+    Opens the record creation form (Classic checkbox selects record-add vs kd-record-add).
     """
     from ..views import build_create_record_modal
-    
-    # Extract metadata from button value
+
     value = body["actions"][0].get("value", "{}")
     approval_data = json.loads(value)
-    
-    # Get the current search query from the view state
+
     view_state = body.get("view", {}).get("state", {}).get("values", {})
     current_query = view_state.get("search_query", {}).get("update_search_query", {}).get("value", "")
-    
+
     try:
-        # Open the create record modal (stacked on top) - initially without expiration dropdown
         client.views_push(
             trigger_id=body["trigger_id"],
-            view=build_create_record_modal(approval_data, current_query, show_expiration=False)
+            view=build_create_record_modal(
+                approval_data,
+                current_query,
+                show_expiration=False,
+                use_classic=False,
+            ),
         )
     except Exception as e:
-        logger.error(f"Failed to open create record modal: {e}")
+        logger.error(f"Failed to open create record modal: {e}", exc_info=True)
+
+
+def handle_create_record_classic_vault_action(body: Dict[str, Any], client):
+    """Toggle Classic vs Keeper Drive options when the vault checkbox changes."""
+    view = body["view"]
+    metadata = json.loads(view["private_metadata"])
+    values = view.get("state", {}).get("values", {})
+
+    use_classic = _is_classic_vault_checked(values)
+    self_destruct_opts = values.get("self_destructive_actions", {}).get(
+        "self_destructive_checkbox", {}
+    ).get("selected_options", [])
+    show_expiration = use_classic and len(self_destruct_opts) > 0
+
+    title = values.get("record_title", {}).get("title_input", {}).get("value", "")
+
+    from ..views import build_create_record_modal
+    client.views_update(
+        view_id=view["id"],
+        view=build_create_record_modal(
+            approval_data=metadata,
+            original_query=title or "",
+            show_expiration=show_expiration,
+            use_classic=use_classic,
+        ),
+    )
 
 
 def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_client):
@@ -786,6 +801,9 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
     auto_gen_selected = values.get("auto_gen_password", {}).get("auto_gen_checkbox", {}).get("selected_options", [])
     auto_gen_checked = any(opt.get("value") == "auto_gen" for opt in auto_gen_selected)
     
+    use_classic = _is_classic_vault_checked(values)
+    is_keeper_drive = not use_classic
+
     # Extract self-destruct checkbox and expiration
     self_destruct_enabled = False
     self_destruct_duration = None
@@ -820,19 +838,42 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
             }
         }
     
-    try:
-        logger.info(f"Creating record '{title}' for requester {requester_id}" + (f" with self-destruct" if self_destruct_enabled else ""))
-        generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
-        
-        create_result = keeper_client.create_record(
-            title=title,
-            login=login or None,
-            password=None if generate_password else (password or None),
-            url=url or None,
-            notes=notes or None,
-            generate_password=generate_password,
-            self_destruct_duration=self_destruct_duration if self_destruct_enabled else None
+    if is_keeper_drive and self_destruct_enabled:
+        from ..utils import send_error_dm
+        send_error_dm(
+            client, body["user"]["id"],
+            "Self-destruct not supported",
+            "Self-destruct records are only supported in Classic shared folders.",
         )
+        return
+
+    try:
+        vault_label = "Classic" if use_classic else "Keeper Drive"
+        logger.info(
+            f"Creating {vault_label} record '{title}' for requester {requester_id}"
+            + (f" with self-destruct" if self_destruct_enabled else "")
+        )
+        generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
+
+        if is_keeper_drive:
+            create_result = keeper_client.create_kd_record(
+                title=title,
+                login=login or None,
+                password=None if generate_password else (password or None),
+                url=url or None,
+                notes=notes or None,
+                generate_password=generate_password,
+            )
+        else:
+            create_result = keeper_client.create_record(
+                title=title,
+                login=login or None,
+                password=None if generate_password else (password or None),
+                url=url or None,
+                notes=notes or None,
+                generate_password=generate_password,
+                self_destruct_duration=self_destruct_duration if self_destruct_enabled else None,
+            )
         
         if not create_result.get('success'):
             # Show error in modal
@@ -864,9 +905,10 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
         from ..models import KeeperRecord
         newly_created_record = KeeperRecord(
             uid=record_uid,
-                title=title,
+            title=title,
             record_type='login',
-            notes=notes or None
+            notes=notes or None,
+            is_keeper_drive=is_keeper_drive or create_result.get('is_keeper_drive', False),
         )
         
         # Show only the newly created record (no unnecessary search)

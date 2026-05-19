@@ -24,7 +24,8 @@ from datetime import datetime, timedelta
 from .models import (
     KeeperRecord,
     KeeperFolder,
-    PermissionLevel
+    PermissionLevel,
+    KDPermissionRole,
 )
 from .config import KeeperConfig
 from .logger import logger
@@ -184,7 +185,7 @@ class KeeperClient:
             else:
                 logger.debug("Search command timed out or failed")
                 return []
-                
+
         except Exception as e:
             logger.debug(f"Error searching records: {e}")
             import traceback
@@ -205,7 +206,7 @@ class KeeperClient:
             # Use search command with shared folder category filter (-c s)
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c s "{safe_query}" --format=json'},
+                json={"command": f'search -c d "{safe_query}" --format=json'},
                 timeout=10
             )
             
@@ -849,6 +850,157 @@ class KeeperClient:
                 'error': f"Error granting folder access: {str(e)}"
             }
 
+    def grant_kd_record_access(
+        self,
+        record_uid: str,
+        user_email: str,
+        role: KDPermissionRole,
+        duration_seconds: Optional[int] = 86400,
+    ) -> Dict[str, Any]:
+        """Grant Keeper Drive record access using kd-share-record."""
+        try:
+            if role == KDPermissionRole.TRANSFER_OWNER:
+                command = (
+                    f"kd-share-record {record_uid} -e {user_email} -a owner -f"
+                )
+                exec_result = self._execute_command(command, max_wait=10)
+                if not exec_result.get('success'):
+                    return exec_result
+                result_data = exec_result['data']
+                if result_data.get('status') == 'success':
+                    return {
+                        'success': True,
+                        'expires_at': 'N/A (Ownership Transfer)',
+                        'permission': role.value,
+                        'duration': 'permanent',
+                    }
+                return {
+                    'success': False,
+                    'error': f"Failed to transfer ownership: {self._command_error_message(result_data)}",
+                }
+
+            revoke_cmd = f"kd-share-record {record_uid} -e {user_email} -a revoke -f"
+            try:
+                self._execute_command(revoke_cmd, max_wait=5)
+            except Exception as e:
+                logger.debug(f"KD record revoke skipped or failed: {e}")
+
+            cmd_parts = [
+                "kd-share-record",
+                record_uid,
+                "-e",
+                user_email,
+                "-a",
+                "grant",
+                "-r",
+                role.value,
+            ]
+            if duration_seconds is not None:
+                cmd_parts.extend(["--expire-in", self._format_duration(duration_seconds)])
+                expires_at = datetime.now() + timedelta(seconds=duration_seconds)
+                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                duration_label = 'temporary'
+            else:
+                expires_at_str = "Never (Permanent)"
+                duration_label = 'permanent'
+
+            cmd_parts.append("-f")
+            exec_result = self._execute_command(" ".join(cmd_parts), max_wait=10)
+            if not exec_result.get('success'):
+                return exec_result
+
+            result_data = exec_result['data']
+            if self._is_invitation_response(result_data):
+                return {
+                    'success': True,
+                    'invitation_sent': True,
+                    'expires_at': 'Pending Invitation',
+                    'permission': role.value,
+                    'duration': 'permanent',
+                    'message': (
+                        'Share invitation sent. User must accept the invitation and '
+                        'create a Keeper account before they can access this record.'
+                    ),
+                }
+
+            if result_data.get('status') == 'success':
+                return {
+                    'success': True,
+                    'expires_at': expires_at_str,
+                    'permission': role.value,
+                    'duration': duration_label,
+                }
+
+            return {
+                'success': False,
+                'error': f"Failed to grant access: {self._command_error_message(result_data)}",
+            }
+        except Exception as e:
+            return {'success': False, 'error': f"Error granting Keeper Drive record access: {str(e)}"}
+
+    def grant_kd_folder_access(
+        self,
+        folder_uid: str,
+        user_email: str,
+        role: KDPermissionRole,
+        duration_seconds: Optional[int] = 86400,
+    ) -> Dict[str, Any]:
+        """Grant Keeper Drive folder access using kd-share-folder."""
+        try:
+            cmd_parts = [
+                "kd-share-folder",
+                folder_uid,
+                "-e",
+                user_email,
+                "-a",
+                "grant",
+                "-r",
+                role.value,
+            ]
+            if duration_seconds is not None:
+                cmd_parts.extend(["--expire-in", self._format_duration(duration_seconds)])
+                expires_at = datetime.now() + timedelta(seconds=duration_seconds)
+                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                duration_label = 'temporary'
+            else:
+                expires_at_str = "Never (Permanent)"
+                duration_label = 'permanent'
+
+            cmd_parts.append("-f")
+            exec_result = self._execute_command(" ".join(cmd_parts), max_wait=10)
+            if not exec_result.get('success'):
+                return exec_result
+
+            result_data = exec_result['data']
+            if self._is_invitation_response(result_data):
+                return {
+                    'success': True,
+                    'invitation_sent': True,
+                    'expires_at': 'Pending Invitation',
+                    'permission': role.value,
+                    'duration': 'permanent',
+                    'message': (
+                        'Share invitation sent. User must accept the invitation and '
+                        'create a Keeper account before they can access this folder.'
+                    ),
+                }
+
+            if result_data.get('status') == 'success':
+                return {
+                    'success': True,
+                    'expires_at': expires_at_str,
+                    'permission': role.value,
+                    'duration': duration_label,
+                }
+
+            return {
+                'success': False,
+                'error': f"Failed to grant access: {self._command_error_message(result_data)}",
+            }
+        except Exception as e:
+            return {'success': False, 'error': f"Error granting Keeper Drive folder access: {str(e)}"}
+
+
     def _poll_for_result(self, request_id: str, max_wait: int = 15) -> Optional[Dict[str, Any]]:
         """
         Poll for async command result till got the result.
@@ -918,6 +1070,63 @@ class KeeperClient:
         logger.warning(f"Polling timed out after {max_wait} seconds")
         return None
     
+    @staticmethod
+    def _is_keeper_drive_from_details(details: str) -> bool:
+        """Parse Record/Folder Category from search details string."""
+        if not details:
+            return False
+        for part in details.split(", "):
+            if part.startswith("Record Category: ") or part.startswith("Folder Category: "):
+                category = part.split(": ", 1)[1].strip().lower()
+                return category == "keeperdrive"
+        return False
+
+    def _execute_command(self, command: str, max_wait: int = 10) -> Dict[str, Any]:
+        """Run an async Commander command and return the polled result payload."""
+        response = self.session.post(
+            f'{self.base_url}/executecommand-async',
+            json={"command": command},
+            timeout=10,
+        )
+        if response.status_code != 202:
+            return {
+                'success': False,
+                'error': f"Failed to submit command: HTTP {response.status_code}",
+            }
+
+        result = response.json()
+        request_id = result.get('request_id')
+        if not request_id:
+            return {'success': False, 'error': "No request_id received from API"}
+
+        result_data = self._poll_for_result(request_id, max_wait=max_wait)
+        if not result_data:
+            return {'success': False, 'error': "Command timed out or failed"}
+
+        return {'success': True, 'data': result_data}
+
+    @staticmethod
+    def _command_error_message(result_data: Dict[str, Any]) -> str:
+        error_msg = result_data.get('message', result_data.get('error', 'Unknown error'))
+        if isinstance(error_msg, list):
+            return '\n'.join(error_msg)
+        return str(error_msg)
+
+    @staticmethod
+    def _is_invitation_response(result_data: Dict[str, Any]) -> bool:
+        message = result_data.get('message', [])
+        if isinstance(message, list):
+            message_text = ' '.join(message).lower()
+        else:
+            message_text = str(message).lower()
+        error_field = result_data.get('error', '')
+        error_lower = error_field.lower() if error_field else ''
+        combined = f"{message_text} {error_lower}"
+        return (
+            'invitation has been sent' in combined
+            or 'repeat this command when invitation is accepted' in combined
+        )
+
     def _parse_search_records_results(
         self,
         result_data: Dict,
@@ -949,8 +1158,9 @@ class KeeperClient:
                 record_type = 'login'  # Default type
                 notes = ''
                 
-                # Parse details string: "Type: login, Description: bishal@gmail.com"
+                # Parse details string: "Type: login, Description: ..., Record Category: Classic"
                 details = item.get('details', '')
+                is_keeper_drive = self._is_keeper_drive_from_details(details)
                 if details:
                     parts = details.split(', ')
                     for part in parts:
@@ -968,7 +1178,8 @@ class KeeperClient:
                         uid=uid,
                         title=title,
                         record_type=record_type,
-                        notes=notes
+                        notes=notes,
+                        is_keeper_drive=is_keeper_drive,
                     ))
                     
                     if len(records) >= limit:
@@ -1006,12 +1217,14 @@ class KeeperClient:
                 uid = item.get('uid', '')
                 name = item.get('name', '')
                 folder_type = item.get('type', 'shared_folder')
-                
+                details = item.get('details', '')
+                is_keeper_drive = self._is_keeper_drive_from_details(details)
                 if uid and name:
                     folders.append(KeeperFolder(
                         uid=uid,
                         name=name,
-                        folder_type=folder_type
+                        folder_type=folder_type,
+                        is_keeper_drive=is_keeper_drive,
                     ))
                     
                     if len(folders) >= limit:
@@ -1322,6 +1535,92 @@ class KeeperClient:
                 'success': False,
                 'error': f"Error creating record: {str(e)}"
             }
+
+    def create_kd_record(
+        self,
+        title: str,
+        login: Optional[str] = None,
+        password: Optional[str] = None,
+        url: Optional[str] = None,
+        notes: Optional[str] = None,
+        generate_password: bool = False,
+        folder_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a record in a Keeper Drive folder using kd-record-add."""
+        try:
+            command_parts = [
+                "kd-record-add",
+                f"--title {shlex.quote(title)}",
+                "--record-type login",
+            ]
+            if folder_uid:
+                command_parts.append(f"--folder {shlex.quote(folder_uid)}")
+            if notes:
+                notes_for_cli = notes.replace('\n', '\\n')
+                command_parts.append(f'--notes {shlex.quote(notes_for_cli)}')
+            if login:
+                command_parts.append(f'login={shlex.quote(login)}')
+            if password:
+                command_parts.append(f'password={shlex.quote(password)}')
+            elif generate_password:
+                command_parts.append('password=$GEN')
+            if url:
+                command_parts.append(f'url={shlex.quote(url)}')
+            command_parts.append("-f")
+
+            exec_result = self._execute_command(" ".join(command_parts), max_wait=30)
+            if not exec_result.get('success'):
+                return exec_result
+
+            result_data = exec_result['data']
+            if result_data.get('status') != 'success':
+                return {
+                    'success': False,
+                    'error': f"Failed to create record: {self._command_error_message(result_data)}",
+                }
+
+            record_uid = self._extract_record_uid_from_add_result(result_data, title)
+            if record_uid:
+                return {
+                    'success': True,
+                    'record_uid': record_uid,
+                    'title': title,
+                    'is_keeper_drive': True,
+                }
+            return {
+                'success': True,
+                'record_uid': 'Unknown',
+                'title': title,
+                'is_keeper_drive': True,
+                'note': 'Record created but UID could not be retrieved.',
+            }
+        except Exception as e:
+            logger.error(f"Exception in create_kd_record: {e}", exc_info=True)
+            return {'success': False, 'error': f"Error creating Keeper Drive record: {str(e)}"}
+
+    @staticmethod
+    def _extract_record_uid_from_add_result(result_data: Dict[str, Any], title: str) -> Optional[str]:
+        """Extract a record UID from record-add / kd-record-add command output."""
+        record_uid = result_data.get('uid') or result_data.get('record_uid')
+        if record_uid:
+            return record_uid
+
+        data = result_data.get('data')
+        if isinstance(data, dict):
+            record_uid = data.get('uid') or data.get('record_uid')
+            if record_uid:
+                return record_uid
+        elif isinstance(data, str) and len(data.strip()) == 22:
+            return data.strip()
+
+        message = result_data.get('message', '')
+        if isinstance(message, list):
+            message = '\n'.join(message)
+        uid_match = re.search(r'[A-Za-z0-9_-]{22}', str(message))
+        if uid_match:
+            return uid_match.group(0)
+
+        return None
     
     def get_user_shared_folders(self, user_email: str) -> List[Dict[str, Any]]:
         """

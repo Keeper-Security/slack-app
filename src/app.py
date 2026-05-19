@@ -35,6 +35,7 @@ from .handlers import (
     handle_search_folders,
     handle_search_modal_submit,
     handle_refine_search_action,
+    handle_item_selection_action,
     handle_approve_pedm_request,
     handle_deny_pedm_request,
 )
@@ -187,13 +188,6 @@ class KeeperSlackApp:
             ack()
             handle_search_records(body, client, self.config, self.keeper_client)
 
-        @self.slack_app.action("item_selection")
-        def action_item_selection(ack, body, client):
-            """Refresh search modal on radio selection (for PAM rotate checkbox)."""
-            ack()
-            from .handlers.modals import handle_item_selection_action
-            handle_item_selection_action(body, client, self.config, self.keeper_client)
-        
         # Dropdown selectors on approval cards
         @self.slack_app.action("select_duration")
         def action_select_duration(ack):
@@ -211,11 +205,7 @@ class KeeperSlackApp:
                 
                 # Get selected permission
                 selected_permission = body["actions"][0]["selected_option"]["value"]
-                
-                # Determine if duration should be shown
-                PERMANENT_ONLY = ["can_share", "edit_and_share", "change_owner", "manage_users", "manage_all"]
-                show_duration = selected_permission not in PERMANENT_ONLY
-                
+
                 # Check if this is a modal or a message
                 if "view" in body:
                     # MODAL: Rebuild search modal
@@ -223,14 +213,23 @@ class KeeperSlackApp:
                     
                     view = body["view"]
                     metadata = json.loads(view["private_metadata"])
-                    
+                    is_kd = metadata.get('selected_is_keeper_drive', False)
+                    if is_kd:
+                        PERMANENT_ONLY = ["owner"]
+                    else:
+                        PERMANENT_ONLY = [
+                            "can_share", "edit_and_share", "change_owner",
+                            "manage_users", "manage_all",
+                        ]
+                    show_duration = selected_permission not in PERMANENT_ONLY
                     updated_modal = build_search_modal(
                         query=metadata.get("query", ""),
                         search_type=metadata.get("search_type", "record"),
                         results=metadata.get("cached_results", []),
                         approval_data=metadata,
                         loading=False,
-                        show_duration=show_duration
+                        show_duration=show_duration,
+                        selected_is_keeper_drive=is_kd,
                     )
                     
                     client.views_update(view_id=view["id"], view=updated_modal)
@@ -238,9 +237,14 @@ class KeeperSlackApp:
                     
                 elif "message" in body:
                     # MESSAGE: Update approval card (UID-based requests)
-                    from .views import build_permission_selector_block
                     from .utils import get_duration_options
                     from .models import RequestType
+                    
+                    PERMANENT_ONLY = [
+                        "can_share", "edit_and_share", "change_owner",
+                        "manage_users", "manage_all", "owner",
+                    ]
+                    show_duration = selected_permission not in PERMANENT_ONLY
                     
                     message = body["message"]
                     channel = body["channel"]["id"]
@@ -313,6 +317,23 @@ class KeeperSlackApp:
 
         
         # Search modal action buttons
+        @self.slack_app.action("item_selection")
+        def action_item_selection(ack, body, client):
+            """Refresh search modal on radio selection.
+
+            Triggers re-render so that:
+            - Permission options switch between Keeper Drive and Classic.
+            - PAM rotate-on-expiration checkbox appears only for selected
+              `pamUser` records.
+            """
+            ack()
+            try:
+                handle_item_selection_action(body, client, self.config, self.keeper_client)
+            except Exception as e:
+                logger.error(f"Failed to update modal on item selection: {e}")
+                import traceback
+                traceback.print_exc()
+
         @self.slack_app.action("refine_search_action")
         def action_refine_search(ack, body, client):
             ack()
@@ -323,7 +344,18 @@ class KeeperSlackApp:
             ack()
             from .handlers.modals import handle_create_new_record_action
             handle_create_new_record_action(body, client, self.config, self.keeper_client)
-        
+
+        @self.slack_app.action("classic_vault_checkbox")
+        def action_classic_vault_checkbox(ack, body, client):
+            ack()
+            try:
+                from .handlers.modals import handle_create_record_classic_vault_action
+                handle_create_record_classic_vault_action(body, client)
+            except Exception as e:
+                logger.error(f"Failed to update Classic vault checkbox: {e}")
+                import traceback
+                traceback.print_exc()
+
         @self.slack_app.action("self_destructive_checkbox")
         def action_self_destruct_checkbox(ack, body, client):
             """Handle self-destruct checkbox toggle to show/hide expiration field."""
@@ -338,13 +370,17 @@ class KeeperSlackApp:
                 view = body["view"]
                 view_id = view["id"]
                 metadata = json.loads(view["private_metadata"])
-                
-                # Rebuild modal with expiration field shown/hidden
+                view_values = view.get("state", {}).get("values", {})
+                from .handlers.modals import _is_classic_vault_checked
+                use_classic = _is_classic_vault_checked(view_values)
+                title = view_values.get("record_title", {}).get("title_input", {}).get("value", "")
+
                 from .views import build_create_record_modal
                 updated_modal = build_create_record_modal(
                     approval_data=metadata,
-                    original_query="",
-                    show_expiration=is_checked  # Show dropdown only if checked
+                    original_query=title or "",
+                    show_expiration=is_checked and use_classic,
+                    use_classic=use_classic,
                 )
                 
                 # Update the modal
