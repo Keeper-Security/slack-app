@@ -24,6 +24,16 @@ class RequestType(Enum):
     FOLDER = "folder"
     ONE_TIME_SHARE = "one_time_share"
 
+class KDPermissionRole(Enum):
+    """Keeper Drive role-based permissions (kd-share-record / kd-share-folder)."""
+
+    VIEWER = "viewer"
+    SHARE_MANAGER = "share-manager"
+    CONTENT_MANAGER = "content-manager"
+    CONTENT_SHARE_MANAGER = "content-share-manager"
+    FULL_MANAGER = "full-manager"
+    TRANSFER_OWNER = "owner"
+
 
 class PermissionLevel(Enum):
     """Permission levels for record/folder access."""
@@ -66,6 +76,9 @@ class KeeperRecord:
     notes: Optional[str] = None
     """Record notes/description"""
     
+    is_keeper_drive: bool = False
+    """True if record belongs to Keeper Drive (Nested Share Subfolders)."""
+    
     @property
     def display_name(self) -> str:
         """Get display name for UI."""
@@ -87,6 +100,9 @@ class KeeperFolder:
     
     folder_type: str = "folder"
     """Type of folder (e.g., 'folder', 'shared_folder')"""
+    
+    is_keeper_drive: bool = False
+    """True if folder belongs to Keeper Drive (Nested Share Subfolders)."""
     
     @property
     def display_name(self) -> str:

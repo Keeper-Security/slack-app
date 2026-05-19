@@ -5,7 +5,7 @@ services:
     ports:
       - port:port
     image: keeper/commander:latest
-    command: service-create -p 8900 -c 'search, share-record, share-folder, record-add, one-time-share, pedm, device-approve, get' -f json -q y -ur J_ZQJg4sMBsF0GYsuCtDHA --ksm-config XXXXXXXX --record XXXXXXXX
+    command: service-create -p 8900 -c 'search, share-record, share-folder, kd-share-record, kd-share-folder, kd-record-add, record-add, one-time-share, pedm, device-approve, get' -f json -q y -ur J_ZQJg4sMBsF0GYsuCtDHA --ksm-config XXXXXXXX --record XXXXXXXX
     healthcheck:
       test:
         - CMD-SHELL
