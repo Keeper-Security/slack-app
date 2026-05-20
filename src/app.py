@@ -186,6 +186,13 @@ class KeeperSlackApp:
         def action_search_one_time_shares(ack, body, client):
             ack()
             handle_search_records(body, client, self.config, self.keeper_client)
+
+        @self.slack_app.action("item_selection")
+        def action_item_selection(ack, body, client):
+            """Refresh search modal on radio selection (for PAM rotate checkbox)."""
+            ack()
+            from .handlers.modals import handle_item_selection_action
+            handle_item_selection_action(body, client, self.config, self.keeper_client)
         
         # Dropdown selectors on approval cards
         @self.slack_app.action("select_duration")

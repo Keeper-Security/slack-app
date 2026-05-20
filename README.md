@@ -23,7 +23,8 @@ The customer is responsible for hosting the Slack App and Commander Service Mode
 - **Input Sanitization**: All user inputs are sanitized to prevent command injection and URL injection attacks
 - **URL Injection Protection**: Colons and forward slashes are filtered from user inputs to prevent phishing links
 - **Slack Mention Prevention**: `@here`, `@channel`, and `@everyone` mentions are automatically removed
-- **PAM Record Protection**: PAM records are excluded from search results and cannot be shared via one-time links
+- **PAM Record Protection**: PAM records are excluded from one-time-share search and cannot be shared via one-time links (regular access requests can find PAM records in search)
+- **PAM Rotate on Expiration**: Time-limited record shares of **pamUser** records show a *Rotate credentials when access expires* checkbox (checked by default); when enabled, `share-record` is called with `--rotate-on-expiration` so Keeper rotates the credential automatically when the share expires. Rotation must already be configured on the record in the Keeper Vault — if not, the approval fails with a clear error.
 - **KSM Integration**: Credentials are securely stored in Keeper Secrets Manager
 - **Docker URL Auto-Fix**: Automatically converts `localhost` to `commander` when running in Docker containers
 
