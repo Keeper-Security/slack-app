@@ -24,6 +24,53 @@ def is_pam_record_type(record_type: str) -> bool:
     return bool(record_type) and 'pam' in record_type.lower()
 
 
+def is_pam_user_record_type(record_type: str) -> bool:
+    """True only for the pamUser record type (rotation flow target)."""
+    return bool(record_type) and record_type.strip().lower() == 'pamuser'
+
+
+def results_contain_pam_record(results) -> bool:
+    """True if any search result is a PAM record type."""
+    if not results:
+        return False
+    for item in results:
+        if isinstance(item, dict):
+            record_type = item.get('record_type', '')
+        else:
+            record_type = getattr(item, 'record_type', '')
+        if is_pam_record_type(record_type):
+            return True
+    return False
+
+
+def extract_rotate_on_expire_from_approval(state, message_blocks) -> bool:
+    """Read the PAM rotate checkbox on an approval channel message."""
+    if state and state.get('values', {}).get('pam_rotate_actions', {}).get('pam_rotate_checkbox'):
+        selected = state['values']['pam_rotate_actions']['pam_rotate_checkbox'].get(
+            'selected_options', []
+        )
+        return any(o.get('value') == 'rotate_on_expire' for o in selected)
+
+    for block in message_blocks or []:
+        if block.get('block_id') != 'pam_rotate_actions':
+            continue
+        for element in block.get('elements', []):
+            if element.get('action_id') != 'pam_rotate_checkbox':
+                continue
+            initial = element.get('initial_options', [])
+            return any(o.get('value') == 'rotate_on_expire' for o in initial)
+    return False
+
+
+def extract_rotate_on_expire_from_modal(values: dict) -> bool:
+    """Read the PAM rotate checkbox from a search modal submission."""
+    block = values.get('pam_rotate_block', {}).get('pam_rotate_checkbox', {})
+    if not block:
+        return False
+    selected = block.get('selected_options', [])
+    return any(o.get('value') == 'rotate_on_expire' for o in selected)
+
+
 def is_running_in_docker() -> bool:
     """
     Check if the application is running inside a Docker container.

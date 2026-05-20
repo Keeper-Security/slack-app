@@ -17,7 +17,16 @@ Slack UI builders using Block Kit.
 import json
 from typing import List, Dict, Any, Optional
 from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
-from .utils import format_timestamp, format_permission_name, format_duration, get_duration_options, sanitize_hyperlinks
+from .utils import (
+    format_timestamp,
+    format_permission_name,
+    format_duration,
+    get_duration_options,
+    sanitize_hyperlinks,
+    is_pam_record_type,
+    is_pam_user_record_type,
+    results_contain_pam_record,
+)
 from .logger import logger
 
 # Default Keeper server domain
@@ -152,6 +161,21 @@ def post_approval_request(
                 }
             }
         })
+
+        if (
+            request_type == RequestType.RECORD
+            and record_details
+            and is_pam_user_record_type(record_details.record_type)
+        ):
+            blocks.append(build_pam_rotate_on_expire_block())
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "_PAM User record: credentials will rotate when time-limited access expires (rotation must be configured on the record)._",
+                }],
+            })
+            action_data["is_pam"] = True
     
     # Add approve/deny buttons based on request type
     if is_uid:
@@ -199,7 +223,44 @@ def post_approval_request(
         unfurl_media=False
     )
 
-def build_permission_selector_block(request_type: RequestType, for_modal: bool = False) -> Dict[str, Any]:
+def build_pam_rotate_on_expire_block(
+    for_modal: bool = False,
+    initial_checked: bool = True,
+) -> Dict[str, Any]:
+    """
+    Checkbox to rotate PAM credentials when time-limited share access expires.
+    """
+    option = {
+        "text": {"type": "plain_text", "text": "Rotate credentials when access expires"},
+        "value": "rotate_on_expire",
+    }
+    checkbox_element = {
+        "type": "checkboxes",
+        "action_id": "pam_rotate_checkbox",
+        "options": [option],
+    }
+    if initial_checked:
+        checkbox_element["initial_options"] = [option]
+    if for_modal:
+        return {
+            "type": "input",
+            "block_id": "pam_rotate_block",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "PAM credential rotation"},
+            "element": checkbox_element,
+        }
+    return {
+        "type": "actions",
+        "block_id": "pam_rotate_actions",
+        "elements": [checkbox_element],
+    }
+
+
+def build_permission_selector_block(
+    request_type: RequestType,
+    for_modal: bool = False,
+    initial_value: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Build permission level selector block.
     """
@@ -215,7 +276,8 @@ def build_permission_selector_block(request_type: RequestType, for_modal: bool =
                 "value": PermissionLevel.CAN_EDIT.value
             }
         ]
-        initial_option = options[0]  # "View Only" by default for one-time shares
+        default_index = 0  # "View Only" by default for one-time shares
+        initial_option = options[default_index]
     elif request_type == RequestType.RECORD:
         options = [
             {
@@ -239,7 +301,8 @@ def build_permission_selector_block(request_type: RequestType, for_modal: bool =
                 "value": PermissionLevel.CHANGE_OWNER.value
             }
         ]
-        initial_option = options[0]  # "View Only" by default (minimum access)
+        default_index = 0  # "View Only" by default (minimum access)
+        initial_option = options[default_index]
     else:  # FOLDER
         options = [
             {
@@ -259,7 +322,14 @@ def build_permission_selector_block(request_type: RequestType, for_modal: bool =
                 "value": PermissionLevel.MANAGE_ALL.value
             }
         ]
-        initial_option = options[0]  # "No User Permissions" by default
+        default_index = 0  # "No User Permissions" by default
+        initial_option = options[default_index]
+
+    if initial_value:
+        for opt in options:
+            if opt.get("value") == initial_value:
+                initial_option = opt
+                break
     
     if for_modal:
         # Use input block for full-width dropdown (better display for long text in modals)
@@ -293,13 +363,112 @@ def build_permission_selector_block(request_type: RequestType, for_modal: bool =
             }
         }
 
+def build_grant_processing_modal(
+    message: str = "Granting access and applying rotation settings...",
+) -> Dict[str, Any]:
+    return {
+        "type": "modal",
+        "callback_id": "grant_processing_modal",
+        "title": {"type": "plain_text", "text": "Granting Access..."},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":hourglass_flowing_sand: *{message}*",
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_This usually takes a few seconds. Please don't close this window._",
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def build_grant_success_modal(
+    title_text: str,
+    detail_lines: List[str],
+) -> Dict[str, Any]:
+    """
+    Build a success confirmation modal shown after a deferred-ack grant flow
+    completes. Lets the admin dismiss the modal with a Close button.
+    """
+    text_lines = [f"*{title_text}*", ""] + detail_lines
+    return {
+        "type": "modal",
+        "callback_id": "grant_success_modal",
+        "title": {"type": "plain_text", "text": "Access Granted"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n".join(text_lines),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_The approval card and the requester have been notified._",
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def build_grant_error_modal(
+    title_text: str,
+    message: str,
+    footer: str = "Please try again with different settings if needed, or contact the requester directly.",
+) -> Dict[str, Any]:
+    """
+    Build a generic error modal shown after a deferred-ack grant flow fails
+    with an error that does not have a tailored recovery flow.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "grant_error_modal",
+        "title": {"type": "plain_text", "text": "Error"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": title_text},
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message},
+            },
+            {"type": "divider"},
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": footer}
+                ],
+            },
+        ],
+    }
+
+
 def build_search_modal(
     query: str,
     search_type: str,
     results: List[Any],
     approval_data: Dict[str, Any],
     loading: bool = False,
-    show_duration: bool = True
+    show_duration: bool = True,
+    error_banner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build search results modal with interactive search.
@@ -325,37 +494,49 @@ def build_search_modal(
         # Check if results are already dicts (from cached_results) or objects
         if isinstance(results[0], dict):
             metadata['cached_results'] = [
-                {'uid': r.get('uid', ''), 'title': r.get('title', 'Untitled')}
+                {
+                    'uid': r.get('uid', ''),
+                    'title': r.get('title', 'Untitled'),
+                    'record_type': r.get('record_type', ''),
+                }
                 for r in results[:10]
             ]
         else:
             metadata['cached_results'] = [
                 {
                     'uid': r.uid,
-                    'title': r.title if hasattr(r, 'title') else r.name
+                    'title': r.title if hasattr(r, 'title') else r.name,
+                    'record_type': getattr(r, 'record_type', ''),
                 }
                 for r in results[:10]
             ]
     else:
         metadata['cached_results'] = []
     
-    blocks = [
-        {
-            "type": "input",
-            "block_id": "search_query",
-            "label": {"type": "plain_text", "text": "Search Term"},
-            "element": {
-                "type": "plain_text_input",
-                "action_id": "update_search_query",
-                "initial_value": query,
-                "placeholder": {"type": "plain_text", "text": "Type your search query..."}
-            },
-            "hint": {
-                "type": "plain_text",
-                "text": "Modify the search term and click the Refine button below"
-            }
+    blocks = []
+    if error_banner:
+        blocks.append({
+            "type": "section",
+            "block_id": "error_banner",
+            "text": {"type": "mrkdwn", "text": f":warning: {error_banner}"},
+        })
+        blocks.append({"type": "divider"})
+
+    blocks.append({
+        "type": "input",
+        "block_id": "search_query",
+        "label": {"type": "plain_text", "text": "Search Term"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "update_search_query",
+            "initial_value": query,
+            "placeholder": {"type": "plain_text", "text": "Type your search query..."}
+        },
+        "hint": {
+            "type": "plain_text",
+            "text": "Modify the search term and click the Refine button below"
         }
-    ]
+    })
     
     # Build action buttons (Refine Search + optionally Create New Record)
     # Use slim metadata for button values
@@ -412,21 +593,26 @@ def build_search_modal(
     if results:
         # Add radio button selector for results
         options = []
-        initial_option = None  # Will be set if newly_created_uid matches
+        initial_option = None  # Will be set if newly_created_uid or selected_uid matches
         newly_created_uid = approval_data.get('newly_created_uid')
-        
+        selected_uid = approval_data.get('selected_uid')
+        selected_record_is_pam_user = False
+
         for item in results[:10]:  # Limit to 10 for UX
             # Handle both objects (KeeperRecord/KeeperFolder) and dicts (cached results)
             if isinstance(item, dict):
                 # Cached result dict
                 text = f"{item.get('title', 'Untitled')} ({item.get('uid', '')})"
                 value = item.get('uid', '')
+                item_record_type = item.get('record_type', '')
             elif isinstance(item, KeeperRecord):
                 text = f"{item.title} ({item.uid})"
                 value = item.uid
+                item_record_type = getattr(item, 'record_type', '')
             else:  # KeeperFolder
                 text = f"{item.name} ({item.uid})"
                 value = item.uid
+                item_record_type = ''
             
             option = {
                 "text": {"type": "plain_text", "text": text},
@@ -434,12 +620,16 @@ def build_search_modal(
             }
             options.append(option)
             
-            # Pre-select if this is the newly created record
-            if newly_created_uid and value == newly_created_uid:
+            # Pre-select if this is the newly created record or the user just clicked it
+            if selected_uid and value == selected_uid:
+                initial_option = option
+                if is_pam_user_record_type(item_record_type):
+                    selected_record_is_pam_user = True
+            elif not selected_uid and newly_created_uid and value == newly_created_uid:
                 initial_option = option
         
         # If we have a newly created record, add context message
-        if initial_option:
+        if initial_option and not selected_uid:
             blocks.insert(-1, {  # Insert before the last divider
                 "type": "context",
                 "elements": [{
@@ -452,6 +642,7 @@ def build_search_modal(
             "type": "input",
             "block_id": "selected_item",
             "label": {"type": "plain_text", "text": f"Select {search_type}:"},
+            "dispatch_action": True,  # Refresh modal on selection (for PAM rotate checkbox)
             "element": {
                 "type": "radio_buttons",
                 "action_id": "item_selection",
@@ -460,10 +651,13 @@ def build_search_modal(
             "optional": False  # Make selection required
         }
         
-        # Add initial_option if we have a newly created record
+        # Add initial_option if we have a newly created record or current selection
         if initial_option:
             radio_block["element"]["initial_option"] = initial_option
-            logger.info(f"Pre-selecting newly created record: {newly_created_uid}")
+            logger.info(
+                f"Pre-selecting record uid={initial_option['value']} "
+                f"(selected_uid={selected_uid}, newly_created_uid={newly_created_uid})"
+            )
         else:
             logger.info(f"No pre-selection - newly_created_uid: {newly_created_uid}")
         
@@ -471,11 +665,31 @@ def build_search_modal(
         
         # Only show permission and duration selectors if NOT creating self-destruct link
         if not approval_data.get('create_self_destruct', False):
+            selected_permission = approval_data.get('selected_permission')
+            selected_duration = approval_data.get('selected_duration')
+            rotate_initial_checked = approval_data.get('rotate_initial_checked', True)
+
             # Add permission selector (full-width for modal)
-            blocks.append(build_permission_selector_block(request_type, for_modal=True))
+            blocks.append(
+                build_permission_selector_block(
+                    request_type,
+                    for_modal=True,
+                    initial_value=selected_permission,
+                )
+            )
             
             # Add duration selector (conditionally based on permission)
             if show_duration:
+                duration_options = get_duration_options()
+                duration_initial = {
+                    "text": {"type": "plain_text", "text": "1 hour"},
+                    "value": "1h",
+                }
+                if selected_duration:
+                    for opt in duration_options:
+                        if opt.get("value") == selected_duration:
+                            duration_initial = opt
+                            break
                 blocks.append({
                     "type": "input",
                     "block_id": "grant_duration",
@@ -484,17 +698,32 @@ def build_search_modal(
                     "element": {
                         "type": "static_select",
                         "action_id": "grant_duration_select",
-                        "options": get_duration_options(),
-                        "initial_option": {
-                            "text": {"type": "plain_text", "text": "1 hour"},
-                            "value": "1h"
-                        }
+                        "options": duration_options,
+                        "initial_option": duration_initial,
                     },
                     "hint": {
                         "type": "plain_text",
                         "text": "Select how long the access should remain active"
                     }
                 })
+                if (
+                    search_type == "record"
+                    and request_type != RequestType.ONE_TIME_SHARE
+                    and selected_record_is_pam_user
+                ):
+                    blocks.append(
+                        build_pam_rotate_on_expire_block(
+                            for_modal=True,
+                            initial_checked=rotate_initial_checked,
+                        )
+                    )
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": "_Selected PAM User record: credentials rotate when time-limited access expires (rotation must be configured on the record)._",
+                        }],
+                    })
             else:
                 # Show permanent access notice
                 blocks.append({

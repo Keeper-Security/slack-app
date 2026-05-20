@@ -16,7 +16,14 @@ import json
 from typing import Dict, Any
 from ..models import PermissionLevel
 from ..views import update_approval_message, send_access_granted_dm, send_access_denied_dm
-from ..utils import parse_duration_to_seconds, format_duration, get_user_email_from_slack, is_record_owner_error, is_permission_conflict_error
+from ..utils import (
+    parse_duration_to_seconds,
+    format_duration,
+    get_user_email_from_slack,
+    is_record_owner_error,
+    is_permission_conflict_error,
+    extract_rotate_on_expire_from_approval,
+)
 from ..logger import logger
 
 
@@ -110,6 +117,10 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     
     # Get user's real email from Slack
     user_email = get_user_email_from_slack(client, requester_id)
+
+    rotate_on_expire = False
+    if request_type == "record" and duration_seconds and action_data.get("is_pam"):
+        rotate_on_expire = extract_rotate_on_expire_from_approval(state, message_blocks)
     
     # Grant access or create share link via Keeper
     try:
@@ -118,7 +129,8 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 record_uid=identifier,
                 user_email=user_email,
                 permission=permission,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
+                rotate_on_expire=rotate_on_expire,
             )
             item_title = identifier  # In real implementation, fetch actual title
         elif request_type == "folder":
@@ -176,6 +188,8 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                 else:
                     status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
+                if result.get('rotate_on_expire'):
+                    status_msg += "\n*PAM credentials will rotate* when access expires"
                 # Set approval text based on request type
                 if request_type == "record":
                     approval_text = "Record Access Request Approved"
@@ -259,7 +273,66 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
         else:
             # Approval failed - check error type
             error_message = result.get('error', 'Unknown error')
-            
+            error_code = result.get('error_code')
+
+            # PAM rotation not configured: keep approval state, add banner on the card
+            if error_code == 'pam_rotation_not_configured':
+                try:
+                    original_blocks = body["message"]["blocks"]
+                    banner = {
+                        "type": "context",
+                        "block_id": "rotation_error_banner",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": (
+                                ":warning: *Last attempt failed:* Rotation is not "
+                                "configured on this PAM User record. "
+                                "Uncheck *Rotate credentials when access expires* "
+                                "and click Approve again, or configure rotation "
+                                "in the Keeper Vault."
+                            ),
+                        }],
+                    }
+                    new_blocks = [
+                        b for b in original_blocks
+                        if b.get("block_id") != "rotation_error_banner"
+                    ]
+                    inserted = False
+                    for idx, block in enumerate(new_blocks):
+                        if block.get("type") == "actions":
+                            elements = block.get("elements", [])
+                            if any(
+                                el.get("action_id") == "approve_request"
+                                for el in elements
+                            ):
+                                new_blocks.insert(idx, banner)
+                                inserted = True
+                                break
+                    if not inserted:
+                        new_blocks.append(banner)
+                    client.chat_update(
+                        channel=body["channel"]["id"],
+                        ts=body["message"]["ts"],
+                        blocks=new_blocks,
+                        text="Approval pending - rotation not configured",
+                    )
+                    logger.info(
+                        f"Approval {approval_id}: showed rotation-not-configured "
+                        "banner on UID card, approval state unchanged"
+                    )
+                except Exception as banner_error:
+                    logger.warning(
+                        f"Failed to add rotation banner to card: {banner_error}"
+                    )
+                    from ..utils import send_error_dm
+                    send_error_dm(
+                        client=client,
+                        user_id=approver_id,
+                        title="Rotation Not Configured",
+                        message=error_message,
+                    )
+                return
+
             # Check if user is the record owner
             if is_record_owner_error(error_message):
                 logger.info(f"Approval {approval_id}: User is record owner, sending DM to approver")

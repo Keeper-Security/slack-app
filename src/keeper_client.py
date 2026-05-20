@@ -435,7 +435,8 @@ class KeeperClient:
         record_uid: str,
         user_email: str,
         permission: PermissionLevel,
-        duration_seconds: Optional[int] = 86400
+        duration_seconds: Optional[int] = 86400,
+        rotate_on_expire: bool = False,
     ) -> Dict[str, Any]:
         """
         Grant access to a record with time limit using share-record command.
@@ -551,6 +552,8 @@ class KeeperClient:
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
                 expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                if rotate_on_expire:
+                    cmd_parts.append("--rotate-on-expiration")
             else:
                 expires_at_str = "Never (Permanent)"
             
@@ -609,11 +612,17 @@ class KeeperClient:
                         'message': 'Share invitation sent. User must accept the invitation and create a Keeper account before they can access this record.'
                     }
                 
+                pam_rotate_scheduled = bool(
+                    rotate_on_expire
+                    and duration_seconds is not None
+                    and permission not in PERMANENT_ONLY_PERMISSIONS
+                )
                 return {
                     'success': True,
                     'expires_at': expires_at_str,
                     'permission': permission.value,
-                    'duration': 'temporary' if duration_seconds else 'permanent'
+                    'duration': 'temporary' if duration_seconds else 'permanent',
+                    'rotate_on_expire': pam_rotate_scheduled,
                 }
             else:
                 error_msg = result_data.get('message', result_data.get('error', 'Unknown error'))
@@ -622,6 +631,21 @@ class KeeperClient:
                 
 
                 error_lower = error_msg.lower()
+
+                if (
+                    "rotation must be already set" in error_lower
+                    or ("rotate" in error_lower and "expiration" in error_lower and "set on the record" in error_lower)
+                ):
+                    return {
+                        'success': False,
+                        'error_code': 'pam_rotation_not_configured',
+                        'error': (
+                            "Rotation is not configured on this PAM User record.\n\n"
+                            "Set up rotation (Gateway + rotation settings) on the record in the "
+                            "Keeper Vault first, or uncheck *Rotate credentials when access expires* "
+                            "and approve again."
+                        ),
+                    }
                 
                 # Check for time-limited access conflict with share permissions
                 if "time-limited access" in error_lower and "re-share" in error_lower:

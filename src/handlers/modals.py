@@ -45,6 +45,47 @@ def _send_ephemeral_response(response_url: str, text: str) -> bool:
         return False
 
 
+def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_client) -> None:
+    """
+    Refresh the search modal when the user selects a result so the PAM rotate
+    checkbox can appear only for PAM records.
+    """
+    try:
+        view = body.get("view") or {}
+        view_id = view.get("id")
+        if not view_id:
+            return
+
+        metadata_raw = view.get("private_metadata", "{}")
+        try:
+            metadata = json.loads(metadata_raw)
+        except json.JSONDecodeError:
+            logger.warning("item_selection: could not parse private_metadata")
+            return
+
+        selected_option = body.get("actions", [{}])[0].get("selected_option") or {}
+        selected_uid = selected_option.get("value")
+        if not selected_uid:
+            return
+
+        metadata["selected_uid"] = selected_uid
+
+        from ..views import build_search_modal
+
+        updated_modal = build_search_modal(
+            query=metadata.get("query", ""),
+            search_type=metadata.get("search_type", "record"),
+            results=metadata.get("cached_results", []),
+            approval_data=metadata,
+            loading=False,
+        )
+
+        client.views_update(view_id=view_id, view=updated_modal)
+        logger.debug(f"item_selection: refreshed modal for selected_uid={selected_uid}")
+    except Exception as exc:
+        logger.error(f"item_selection handler error: {exc}")
+
+
 def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper_client):
     """
     Handle search modal submission.
@@ -74,6 +115,9 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         
         # Acknowledge immediately for search operations
         ack()
+
+        # Drop any prior selection when running a new search
+        approval_data.pop("selected_uid", None)
         
         # Run search
         request_type = approval_data.get("type", "record")
@@ -129,10 +173,29 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         })
         return
     
-    # Item selected - acknowledge IMMEDIATELY (Slack requires ack within 3 seconds)
-    # This closes the modal; errors will be shown in a new modal
-    ack()
-    
+    # Item selected - acknowledge IMMEDIATELY (Slack requires ack within 3 seconds).
+    pre_ack_request_type = approval_data.get("type", "record")
+    pre_ack_is_self_destruct = approval_data.get("create_self_destruct", False)
+    defer_ack = (
+        pre_ack_request_type == "record"
+        and not pre_ack_is_self_destruct
+        and bool(values.get("pam_rotate_block"))
+    )
+    submitted_view_id = body["view"]["id"]
+
+    if defer_ack:
+        from ..views import build_grant_processing_modal
+        ack(
+            response_action="update",
+            view=build_grant_processing_modal(),
+        )
+        logger.debug(
+            "Deferred ack with processing modal (rotate checkbox in scope); "
+            f"view_id={submitted_view_id}"
+        )
+    else:
+        ack()
+
     selected_uid = selected_item["value"]
     
     # Get record title from the selected item or metadata
@@ -212,6 +275,21 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     
     # Get user's real email from Slack
     user_email = get_user_email_from_slack(client, requester_id)
+
+    rotate_on_expire = False
+    if (
+        request_type == "record"
+        and duration_seconds
+        and not is_self_destruct
+        and values.get("pam_rotate_block")
+    ):
+        from ..utils import (
+            extract_rotate_on_expire_from_modal,
+            is_pam_user_record_type,
+        )
+        record_for_rotate = keeper_client.get_record_by_uid(selected_uid)
+        if record_for_rotate and is_pam_user_record_type(record_for_rotate.record_type):
+            rotate_on_expire = extract_rotate_on_expire_from_modal(values)
     
     try:
         if request_type == "record":
@@ -219,7 +297,8 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 record_uid=selected_uid,
                 user_email=user_email,
                 permission=permission,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
+                rotate_on_expire=rotate_on_expire,
             )
         elif request_type == "folder":
             result = keeper_client.grant_folder_access(
@@ -320,6 +399,8 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                             status_msg = "*Access Granted (No Expiration)*\nAccess remains active indefinitely"
                         else:
                             status_msg = f"*Temporary Access Granted*\nAccess will expire on *{expires_at}*"
+                        if result.get('rotate_on_expire'):
+                            status_msg += "\n*PAM credentials will rotate* when access expires"
                         
                         # Add self-destruct note if applicable
                         if is_self_destruct:
@@ -383,13 +464,93 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     logger.error(f"Failed to update approval card: {update_error}")
             else:
                 logger.warning("No message_ts found in approval_data, cannot update card")
-            
-            # Modal closed via early ack - success!
+
+            # If we deferred the ack, the modal is still open showing
+            if defer_ack:
+                try:
+                    from ..views import build_grant_success_modal
+                    success_title = "Access granted successfully"
+                    detail_lines = [
+                        f"*Request ID:* `{approval_id}`",
+                        f"*Record:* {record_title}",
+                        f"*Permission:* {permission.value}",
+                        f"*Expires:* {result.get('expires_at', duration_text)}",
+                    ]
+                    if result.get('rotate_on_expire'):
+                        detail_lines.append(
+                            ":arrows_counterclockwise: *PAM credentials will rotate when access expires.*"
+                        )
+                    client.views_update(
+                        view_id=submitted_view_id,
+                        view=build_grant_success_modal(
+                            title_text=success_title,
+                            detail_lines=detail_lines,
+                        ),
+                    )
+                except Exception as update_error:
+                    logger.warning(
+                        f"Failed to update modal with success view: {update_error}"
+                    )
+
             logger.info(f"Access granted successfully for {approval_id}")
         else:
             # Failed to grant access
             error_msg = result.get('error', 'Unknown error')
+            error_code = result.get('error_code')
             logger.error(f"Failed to grant access: {error_msg}")
+
+            # PAM rotation not configured: keep modal experience, reopen with banner + state
+            if error_code == 'pam_rotation_not_configured':
+                from ..views import build_search_modal
+                cached_results = approval_data.get('cached_results', [])
+                retry_approval_data = dict(approval_data)
+                retry_approval_data['selected_uid'] = selected_uid
+                retry_approval_data['selected_permission'] = permission.value
+                if duration_seconds and duration_value not in (None, 'permanent'):
+                    retry_approval_data['selected_duration'] = duration_value
+                retry_approval_data['rotate_initial_checked'] = False
+                retry_modal = build_search_modal(
+                    query=approval_data.get('query', ''),
+                    search_type=approval_data.get('search_type', 'record'),
+                    results=cached_results,
+                    approval_data=retry_approval_data,
+                    loading=False,
+                    error_banner=(
+                        "Rotation is not configured on this PAM User record. "
+                        "Configure rotation in the Keeper Vault, or keep "
+                        "*Rotate credentials when access expires* unchecked and approve again."
+                    ),
+                )
+                try:
+                    if defer_ack:
+                        # Replace the still-open processing modal in place.
+                        # view_id stays valid long after trigger_id expires.
+                        client.views_update(
+                            view_id=submitted_view_id,
+                            view=retry_modal,
+                        )
+                        logger.info(
+                            f"Approval {approval_id}: updated open search modal with "
+                            "rotation-not-configured banner via views_update"
+                        )
+                    else:
+                        client.views_open(
+                            trigger_id=body.get("trigger_id"),
+                            view=retry_modal,
+                        )
+                        logger.info(
+                            f"Approval {approval_id}: reopened search modal with "
+                            "rotation-not-configured banner"
+                        )
+                except Exception as modal_error:
+                    logger.warning(
+                        f"Could not present search modal for rotation error: {modal_error}"
+                    )
+                    from ..utils import send_error_dm
+                    send_error_dm(
+                        client, approver_id, "Rotation Not Configured", error_msg
+                    )
+                return
             
             # Check if user is the record owner
             if is_record_owner_error(error_msg):
@@ -448,38 +609,26 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 
                 # Show error to approver via modal or DM
                 try:
-                    client.views_open(
-                        trigger_id=body.get("trigger_id"),
-                        view={
-                            "type": "modal",
-                            "title": {"type": "plain_text", "text": "Error"},
-                            "close": {"type": "plain_text", "text": "Close"},
-                            "blocks": [
-                                {
-                                    "type": "header",
-                                    "text": {"type": "plain_text", "text": "Failed to Grant Access"}
-                                },
-                                {
-                                    "type": "section",
-                                    "text": {
-                                        "type": "mrkdwn",
-                                        "text": error_msg
-                                    }
-                                },
-                                {"type": "divider"},
-                                {
-                                    "type": "context",
-                                    "elements": [{
-                                        "type": "mrkdwn",
-                                        "text": "Please try again with different settings if needed, or contact the requester directly."
-                                    }]
-                                }
-                            ]
-                        }
+                    from ..views import build_grant_error_modal
+                    error_view = build_grant_error_modal(
+                        title_text="Failed to Grant Access",
+                        message=error_msg,
                     )
+                    if defer_ack:
+                        # Processing modal is still open - swap it in place.
+                        client.views_update(
+                            view_id=submitted_view_id,
+                            view=error_view,
+                        )
+                    else:
+                        client.views_open(
+                            trigger_id=body.get("trigger_id"),
+                            view=error_view,
+                        )
                 except Exception as modal_error:
-                    # If we can't open a modal (trigger_id expired), send DM to approver
-                    logger.warning(f"Could not open error modal: {modal_error}")
+                    # If we can't open/update a modal (trigger_id expired or
+                    # view_id invalid), send DM to approver
+                    logger.warning(f"Could not show error modal: {modal_error}")
                     from ..utils import send_error_dm
                     send_error_dm(client, approver_id, "Failed to Grant Access", error_msg)
             
@@ -487,8 +636,25 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         logger.error(f"Error granting access from search modal: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Try to show error - send DM as fallback since ack may have been called
+
+        # If we deferred the ack, the modal is still showing "Processing..."
+        # Replace it with an error view so the admin isn't stuck.
+        if defer_ack:
+            try:
+                from ..views import build_grant_error_modal
+                client.views_update(
+                    view_id=submitted_view_id,
+                    view=build_grant_error_modal(
+                        title_text="System Error",
+                        message=f"An error occurred while processing your approval: {str(e)}",
+                    ),
+                )
+            except Exception as inner_modal_error:
+                logger.warning(
+                    f"Could not update modal after unexpected error: {inner_modal_error}"
+                )
+
+        # Always also send a DM as a durable record/fallback.
         from ..utils import send_error_dm
         send_error_dm(
             client, body["user"]["id"],
@@ -512,6 +678,9 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     search_type = approval_data.get("search_type", "record")
     
     logger.debug(f"Refining search with query: '{new_query}'")
+
+    # Drop any prior selection when running a new search
+    approval_data.pop("selected_uid", None)
     
     # Re-run search
     request_type = approval_data.get("type", "record")
