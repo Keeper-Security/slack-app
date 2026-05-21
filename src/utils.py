@@ -16,7 +16,7 @@ import os
 import re
 import uuid
 from datetime import datetime
-from typing import Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def is_pam_record_type(record_type: str) -> bool:
@@ -514,6 +514,48 @@ def send_error_dm(client, user_id: str, title: str, message: str) -> bool:
     """
     formatted_text = f"*{title}*\n\n{message}"
     return send_dm(client, user_id, formatted_text)
+
+
+def notify_commander_unauthorized_or_forbidden(
+    client,
+    user_id: str,
+    error: Dict[str, Any],
+    context_lines: Optional[List[str]] = None,
+) -> str:
+    """
+    DM the user about a Commander HTTP 401/403 (or generic submit) error and
+    return the friendly message suitable for an in-modal banner.
+
+    Args:
+        client: Slack WebClient instance
+        user_id: Slack user ID to DM
+        error: structured error dict from ``commander_errors.submit_error``;
+               must contain ``error_code`` and ``error`` keys.
+        context_lines: optional markdown lines appended to the DM body to give
+                       the admin extra context (e.g. ``"*Search query:* `foo`"``).
+
+    Returns:
+        The user-visible error message string (use this as ``error_banner`` for
+        the modal so the in-app banner matches the DM exactly).
+    """
+    from .commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
+
+    error_code = error.get("error_code")
+    error_msg = error.get("error", "Commander rejected the command.")
+
+    if error_code == COMMAND_NOT_ALLOWED:
+        title = "Commander Command Not Allowed"
+    elif error_code == COMMANDER_UNAUTHORIZED:
+        title = "Commander Authentication Failed"
+    else:
+        title = "Commander Command Failed"
+
+    message = error_msg
+    if context_lines:
+        message = f"{error_msg}\n\n" + "\n".join(context_lines)
+
+    send_error_dm(client=client, user_id=user_id, title=title, message=message)
+    return error_msg
 
 
 def send_success_dm(client, user_id: str, title: str, message: str, **kwargs) -> bool:

@@ -16,6 +16,40 @@ import json
 from typing import Dict, Any
 from ..views import build_search_modal
 from ..logger import logger
+from ..commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
+from ..utils import notify_commander_unauthorized_or_forbidden
+
+
+_COMMANDER_REJECTED_CODES = (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED)
+
+
+def _maybe_commander_error_banner(
+    client,
+    user_id: str,
+    search_error: Dict[str, Any],
+    query: str,
+    search_type: str,
+) -> str:
+    """
+    If Commander rejected the search (HTTP 401/403), DM the user with the
+    admin-facing guidance and return a banner string ready for build_search_modal.
+    Returns an empty string for any other / no error so the caller can skip
+    the banner block.
+    """
+    if not search_error:
+        return ""
+    if search_error.get("error_code") not in _COMMANDER_REJECTED_CODES:
+        return ""
+
+    return notify_commander_unauthorized_or_forbidden(
+        client=client,
+        user_id=user_id,
+        error=search_error,
+        context_lines=[
+            f"*Search type:* {search_type}",
+            f"*Search query:* `{query}`",
+        ],
+    )
 
 
 def handle_search_records(body: Dict[str, Any], client, config, keeper_client):
@@ -57,18 +91,29 @@ def handle_search_records(body: Dict[str, Any], client, config, keeper_client):
         # NOW do the slow search (can take as long as needed)
         exclude_pam = action_data.get("type") == "one_time_share"
         logger.debug(f"Searching for records with query: '{query}'")
-        records = keeper_client.search_records(
+        records, search_error = keeper_client.search_records(
             query, limit=20, exclude_pam=exclude_pam
         )
         logger.debug(f"Got {len(records)} records, updating modal...")
-        
-        # Update the modal with actual results
+
+        error_banner = _maybe_commander_error_banner(
+            client=client,
+            user_id=body["user"]["id"],
+            search_error=search_error,
+            query=query,
+            search_type="record",
+        )
+
+        # Update the modal with actual results (or empty results + banner on
+        # Commander 401/403 so the user sees the same actionable guidance that
+        # was just DM'd to them).
         updated_modal = build_search_modal(
             query=query,
             search_type="record",
             results=records,
             approval_data=action_data,
-            loading=False  # Show actual results
+            loading=False,
+            error_banner=error_banner or None,
         )
         
         client.views_update(
@@ -122,16 +167,26 @@ def handle_search_folders(body: Dict[str, Any], client, config, keeper_client):
         
         # NOW do the slow search (can take as long as needed)
         logger.debug(f"Searching for folders with query: '{query}'")
-        folders = keeper_client.search_folders(query, limit=20)
+        folders, search_error = keeper_client.search_folders(query, limit=20)
         logger.debug(f"Got {len(folders)} folders, updating modal...")
-        
-        # Update the modal with actual results
+
+        error_banner = _maybe_commander_error_banner(
+            client=client,
+            user_id=body["user"]["id"],
+            search_error=search_error,
+            query=query,
+            search_type="folder",
+        )
+
+        # Update the modal with actual results (or empty results + banner on
+        # Commander 401/403).
         updated_modal = build_search_modal(
             query=query,
             search_type="folder",
             results=folders,
             approval_data=action_data,
-            loading=False  # Show actual results
+            loading=False,
+            error_banner=error_banner or None,
         )
         
         client.views_update(

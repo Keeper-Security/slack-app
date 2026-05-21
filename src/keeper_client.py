@@ -18,7 +18,7 @@ All backend Logic is being written in this module.
 import requests
 import shlex
 import re
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 
 from .models import (
@@ -28,6 +28,7 @@ from .models import (
     KDPermissionRole,
 )
 from .config import KeeperConfig
+from .commander_errors import log_submit_warning, submit_error
 from .logger import logger
 from .utils import is_pam_record_type
 
@@ -80,6 +81,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
+                log_submit_warning(response.status_code, "server")
                 logger.warning(f"Failed to fetch server domain: {response.status_code}, using default")
                 return default_domain
             
@@ -147,95 +149,105 @@ class KeeperClient:
         query: str,
         limit: int = 20,
         exclude_pam: bool = False,
-    ) -> List[KeeperRecord]:
+    ) -> Tuple[List[KeeperRecord], Optional[Dict[str, Any]]]:
         """
         Search for records using Service Mode search command with category filter.
+
+        Returns a (results, error) tuple. `error` is None on success, or a
+        dict with `error_code` / `error` keys (same shape as `submit_error`)
+        when Commander rejected the request - callers can use this to surface
+        actionable guidance for HTTP 401/403 instead of silently returning an
+        empty result list.
         """
         try:
             # Sanitize query to prevent command injection
             safe_query = self._sanitize_search_query(query)
             if not safe_query:
                 logger.debug("Empty query after sanitization")
-                return []
-            
+                return [], None
+
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
                 json={"command": f'search -c r "{safe_query}" --format=json'},
                 timeout=10
             )
-            
+
             if response.status_code != 202:
-                logger.debug(f"Failed to submit search command: {response.status_code}")
-                return []
-            
+                log_submit_warning(response.status_code, "search records")
+                return [], submit_error(response.status_code)
+
             result = response.json()
             request_id = result.get('request_id')
-            
+
             if not request_id:
                 logger.debug("No request_id received")
-                return []
-            
+                return [], None
+
             # Poll for result
             result_data = self._poll_for_result(request_id, max_wait=30)
-            
+
             if result_data:
-                return self._parse_search_records_results(
-                    result_data, limit, exclude_pam=exclude_pam
+                return (
+                    self._parse_search_records_results(
+                        result_data, limit, exclude_pam=exclude_pam
+                    ),
+                    None,
                 )
-            else:
-                logger.debug("Search command timed out or failed")
-                return []
+            logger.debug("Search command timed out or failed")
+            return [], None
 
         except Exception as e:
             logger.debug(f"Error searching records: {e}")
             import traceback
             traceback.print_exc()
-        return []
-    
-    def search_folders(self, query: str, limit: int = 20) -> List[KeeperFolder]:
+        return [], None
+
+    def search_folders(
+        self, query: str, limit: int = 20
+    ) -> Tuple[List[KeeperFolder], Optional[Dict[str, Any]]]:
         """
         Search for shared folders using Service Mode search command with category filter.
+
+        Returns a (results, error) tuple. See `search_records` for details.
         """
         try:
             # Sanitize query to prevent command injection
             safe_query = self._sanitize_search_query(query)
             if not safe_query:
                 logger.debug("Empty query after sanitization")
-                return []
-            
+                return [], None
+
             # Use search command with shared folder category filter (-c s)
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
                 json={"command": f'search -c d "{safe_query}" --format=json'},
                 timeout=10
             )
-            
+
             if response.status_code != 202:
-                logger.debug(f"Failed to submit search command: {response.status_code}")
-                return []
-            
+                log_submit_warning(response.status_code, "search folders")
+                return [], submit_error(response.status_code)
+
             result = response.json()
             request_id = result.get('request_id')
-            
+
             if not request_id:
                 logger.debug("No request_id received")
-                return []
-            
+                return [], None
+
             # Poll for result with smart backoff
             result_data = self._poll_for_result(request_id, max_wait=10)
-            
+
             if result_data:
-                # Parse results (no client-side filtering needed - search does it)
-                return self._parse_search_folders_results(result_data, limit)
-            else:
-                logger.debug("Search command timed out or failed")
-                return []
-                
+                return self._parse_search_folders_results(result_data, limit), None
+            logger.debug("Search command timed out or failed")
+            return [], None
+
         except Exception as e:
             logger.debug(f"Error searching folders: {e}")
             import traceback
             traceback.print_exc()
-        return []
+        return [], None
     
     def get_record_by_uid(self, record_uid: str) -> Optional[KeeperRecord]:
         """
@@ -251,7 +263,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit search command: {response.status_code}")
+                log_submit_warning(response.status_code, "search record by uid")
                 return None
             
             result_data = response.json()
@@ -332,7 +344,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit get command: {response.status_code}")
+                log_submit_warning(response.status_code, "get record")
                 return None
             
             result_data = response.json()
@@ -386,7 +398,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit search command: {response.status_code}")
+                log_submit_warning(response.status_code, "search folder by uid")
                 return None
             
             result_data = response.json()
@@ -467,7 +479,7 @@ class KeeperClient:
                 )
                 
                 if response.status_code != 202:
-                    return {'success': False, 'error': f"Failed to submit command: HTTP {response.status_code}"}
+                    return submit_error(response.status_code)
                 
                 result = response.json()
                 request_id = result.get('request_id')
@@ -569,10 +581,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {
-                    'success': False,
-                    'error': f"Failed to submit command: HTTP {response.status_code}"
-                }
+                return submit_error(response.status_code)
             
             result = response.json()
             request_id = result.get('request_id')
@@ -759,10 +768,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {
-                    'success': False,
-                    'error': f"Failed to submit command: HTTP {response.status_code}"
-                }
+                return submit_error(response.status_code)
             
             result = response.json()
             request_id = result.get('request_id')
@@ -1089,10 +1095,7 @@ class KeeperClient:
             timeout=10,
         )
         if response.status_code != 202:
-            return {
-                'success': False,
-                'error': f"Failed to submit command: HTTP {response.status_code}",
-            }
+            return submit_error(response.status_code)
 
         result = response.json()
         request_id = result.get('request_id')
@@ -1268,10 +1271,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {
-                    'success': False,
-                    'error': f"Failed to submit command: HTTP {response.status_code}"
-                }
+                return submit_error(response.status_code)
             
             result = response.json()
             request_id = result.get('request_id')
@@ -1422,10 +1422,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {
-                    'success': False,
-                    'error': f"Failed to submit command: HTTP {response.status_code}"
-                }
+                return submit_error(response.status_code)
             
             result = response.json()
             request_id = result.get('request_id')
@@ -1634,7 +1631,7 @@ class KeeperClient:
             )
 
             if response.status_code != 202:
-                logger.error(f"Failed to submit share-report command: {response.status_code}")
+                log_submit_warning(response.status_code, "share-report")
                 return []
 
             request_id = response.json().get('request_id')
@@ -1700,7 +1697,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit tree command: {response.status_code}")
+                log_submit_warning(response.status_code, "tree")
                 return []
             
             request_id = response.json().get('request_id')
@@ -1747,6 +1744,58 @@ class KeeperClient:
             logger.error(f"Exception listing subfolders: {e}", exc_info=True)
             return []
     
+    def sync_down(self) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Pull the latest vault state into Commander Service Mode's local cache
+        so records / folders created in the Keeper web UI (or any other
+        client) become searchable from the Slack app without waiting for
+        Commander's background sync interval.
+
+        Returns a ``(success, error)`` tuple. ``error`` is ``None`` unless
+        Commander rejected the submit with HTTP 401 / 403 (or another
+        non-202 status), in which case it matches ``submit_error()``'s shape
+        so callers can DM / banner the admin with the same actionable
+        guidance used elsewhere.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": "sync-down"},
+                timeout=10,
+            )
+
+            if response.status_code != 202:
+                log_submit_warning(response.status_code, "sync-down")
+                return False, submit_error(response.status_code)
+
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for sync-down")
+                return False, None
+
+            # Vault sync-down can be slow on large vaults; give it room.
+            result_data = self._poll_for_result(request_id, max_wait=45)
+
+            if not result_data:
+                logger.warning("sync-down command timed out")
+                return False, None
+
+            status = result_data.get('status')
+            if status == 'error':
+                error_msg = result_data.get('message', 'Unknown error')
+                logger.error(f"sync-down failed: {error_msg}")
+                return False, None
+
+            if status == 'success':
+                logger.ok("Vault synced from server")
+                return True, None
+
+            return False, None
+
+        except Exception as e:
+            logger.error(f"Exception in sync_down: {e}", exc_info=True)
+            return False, None
+
     def sync_pedm_data(self) -> bool:
         """
         Sync PEDM data from server.
@@ -1759,7 +1808,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit PEDM sync command: {response.status_code}")
+                log_submit_warning(response.status_code, "PEDM sync")
                 return False
             
             request_id = response.json().get('request_id')
@@ -1807,7 +1856,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit PEDM list command: {response.status_code}")
+                log_submit_warning(response.status_code, "PEDM list")
                 return None
             
             request_id = response.json().get('request_id')
@@ -1862,7 +1911,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {'success': False, 'error': f"HTTP {response.status_code}"}
+                return submit_error(response.status_code)
             
             request_id = response.json().get('request_id')
             if not request_id:
@@ -1906,7 +1955,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {'success': False, 'error': f"HTTP {response.status_code}"}
+                return submit_error(response.status_code)
             
             request_id = response.json().get('request_id')
             if not request_id:
@@ -1947,7 +1996,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                logger.error(f"Failed to submit device-approve command: {response.status_code}")
+                log_submit_warning(response.status_code, "device-approve")
                 return []
             
             request_id = response.json().get('request_id')
@@ -2005,7 +2054,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {'success': False, 'error': f"HTTP {response.status_code}"}
+                return submit_error(response.status_code)
             
             request_id = response.json().get('request_id')
             if not request_id:
@@ -2044,7 +2093,7 @@ class KeeperClient:
             )
             
             if response.status_code != 202:
-                return {'success': False, 'error': f"HTTP {response.status_code}"}
+                return submit_error(response.status_code)
             
             request_id = response.json().get('request_id')
             if not request_id:

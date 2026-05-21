@@ -541,7 +541,7 @@ def build_search_modal(
             "value": json.dumps(button_metadata)
         }
     ]
-    
+
     # Add "Create New Record" button beside Refine (only for description-based RECORD requests)
     if (search_type == "record" and 
         approval_data.get('request_type') not in ['one_time_share'] and
@@ -553,15 +553,17 @@ def build_search_modal(
             "action_id": "create_new_record_action",
             "value": json.dumps(button_metadata)
         })
-    
+
+    has_create_button = len(action_buttons) > 1
+
     # Add the combined action block
     blocks.append({
         "type": "actions",
         "elements": action_buttons
     })
-    
-    # Add helpful context if Create button is shown
-    if len(action_buttons) > 1:
+
+    # Add helpful context only when the Create button is actually shown
+    if has_create_button:
         blocks.append({
             "type": "context",
             "elements": [{
@@ -569,16 +571,37 @@ def build_search_modal(
                 "text": "_Or create a new record and share it_"
             }]
         })
-    
+
+    # Results-count line. Doubles as the anchor for the Re-sync Vault button:
+    # we render it as a section with the button as accessory so it sits on
+    # the far right of the line - reads naturally as a "refresh results"
+    # affordance. The accessory is suppressed while a search / sync-down is
+    # in flight (loading=True) so the user can't double-trigger an in-progress
+    # sync.
+    results_text = (
+        "_Searching..._"
+        if loading
+        else f"_Showing {len(results)} result(s) for: `{query}`_"
+    )
+    results_block: Dict[str, Any] = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": results_text},
+    }
+    if not loading:
+        results_block["accessory"] = {
+            "type": "button",
+            "text": {
+                "type": "plain_text",
+                "text": ":arrows_counterclockwise: Re-sync Vault",
+                "emoji": True,
+            },
+            "action_id": "resync_vault_action",
+            "value": json.dumps(button_metadata),
+            "accessibility_label": "Re-sync vault to fetch records created in the Keeper Vault",
+        }
     blocks.extend([
-        {
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": f"_{'Searching...' if loading else f'Showing {len(results)} result(s) for: `{query}`'}_"
-            }]
-        },
-        {"type": "divider"}
+        results_block,
+        {"type": "divider"},
     ])
     
     if results:
@@ -959,48 +982,50 @@ def build_create_record_modal(
     is_kd = not use_classic
 
     blocks = [
-            {
-                "type": "section",
-                "text": {
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Creating record for:* <@{approval_data.get('requester_id')}>\n"
+                    "_After creation, you'll be able to review and approve sharing_"
+                ),
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
                     "type": "mrkdwn",
-                    "text": (
-                        f"*Creating record for:* <@{approval_data.get('requester_id')}>\n"
-                        "_After creation, you'll be able to review and approve sharing_"
-                    ),
-                },
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
-                    }
-                ]
-            },
-            {"type": "divider"},
-            {
-                "type": "input",
-                "block_id": "classic_vault",
-                "dispatch_action": True,
-                "label": {"type": "plain_text", "text": "Vault Type"},
-                "element": {
-                    "type": "checkboxes",
-                    "action_id": "classic_vault_checkbox",
-                    "options": [
-                        {
-                            "text": {"type": "plain_text", "text": "Use Classic permission model"},
-                            "value": "classic",
-                        },
-                    ],
-                    **({"initial_options": [{
-                        "text": {"type": "plain_text", "text": "Use Classic permission model"},
-                        "value": "classic",
-                    }]} if use_classic else {}),
-                },
-                "optional": True,
-            },
-        ]
+                    "text": ":warning: Auto-generate password to keep it fully private. Generated passwords stay in your Keeper Vault (zero-knowledge), while manually entered passwords pass through Slack."
+                }
+            ]
+        },
+        {"type": "divider"},
+    ]
+
+    # Classic vault toggle. Rendered as a section block with the checkbox as
+    # an `accessory` - the canonical pattern from Slack's checkboxes docs
+    # example. Avoids the undocumented "input block + dispatch_action: True
+    # + checkboxes" combination, which is not supported per Slack's docs and
+    # could break in future Slack updates.
+    classic_option = {
+        "text": {"type": "plain_text", "text": "Use Classic permission model"},
+        "value": "classic",
+    }
+    classic_checkbox_element = {
+        "type": "checkboxes",
+        "action_id": "classic_vault_checkbox",
+        "options": [classic_option],
+    }
+    if use_classic:
+        classic_checkbox_element["initial_options"] = [classic_option]
+    blocks.append({
+        "type": "section",
+        "block_id": "classic_vault",
+        "text": {"type": "mrkdwn", "text": "*Vault Type* _(optional)_"},
+        "accessory": classic_checkbox_element,
+    })
     if is_kd:
         blocks.append({
             "type": "context",

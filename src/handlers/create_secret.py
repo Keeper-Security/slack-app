@@ -14,6 +14,7 @@
 
 import json
 from typing import Dict, Any
+from ..commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
 from ..logger import logger
 
 
@@ -187,8 +188,38 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
             logger.ok(f"Record '{title}' ({record_uid}) created by {user_id} in {folder_path}")
         else:
             error_msg = result.get('error', 'Unknown error')
+            error_code = result.get('error_code')
             logger.error(f"Failed to create record: {error_msg}")
-            
+
+            if error_code in (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED):
+                dm_title = (
+                    "Commander Command Not Allowed"
+                    if error_code == COMMAND_NOT_ALLOWED
+                    else "Commander Authentication Failed"
+                )
+                try:
+                    from ..utils import send_error_dm
+                    send_error_dm(client, user_id, dm_title, error_msg)
+                except Exception as dm_error:
+                    logger.warning(f"Failed to DM admin about Commander error: {dm_error}")
+                # Slack does not allow closing a modal from the server after
+                # ack, so we collapse it to a one-line result with a single
+                # Close button. The full guidance lives in the DM we just
+                # sent, which is durable and survives modal dismissal.
+                modal_body_text = (
+                    f":x: *{dm_title}*\n\n"
+                    f"Could not create record *{title}*.\n\n"
+                    "We've sent you a DM with details and next steps. "
+                    "Click *Close* to dismiss."
+                )
+            else:
+                modal_body_text = (
+                    ":x: *Failed to Create Record*\n\n"
+                    f"Could not create record *{title}*:\n"
+                    f"_{error_msg}_\n\n"
+                    "Please try again or contact your administrator."
+                )
+
             client.views_update(
                 view_id=view_id,
                 view={
@@ -200,12 +231,7 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
-                                "text": (
-                                    ":x: *Failed to Create Record*\n\n"
-                                    f"Could not create record *{title}*:\n"
-                                    f"_{error_msg}_\n\n"
-                                    "Please try again or contact your administrator."
-                                )
+                                "text": modal_body_text,
                             }
                         }
                     ]

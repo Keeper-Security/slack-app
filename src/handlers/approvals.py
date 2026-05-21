@@ -24,6 +24,7 @@ from ..utils import (
     is_permission_conflict_error,
     extract_rotate_on_expire_from_approval,
 )
+from ..commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
 from ..logger import logger
 
 
@@ -331,6 +332,48 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                         title="Rotation Not Configured",
                         message=error_message,
                     )
+                return
+
+            # Commander rejected the command (allowlist or auth issue).
+            # DM the approver the actionable guidance and mark the card so
+            # they know to retry after restarting the service.
+            if error_code in (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED):
+                from ..utils import send_error_dm
+                dm_title = (
+                    "Commander Command Not Allowed"
+                    if error_code == COMMAND_NOT_ALLOWED
+                    else "Commander Authentication Failed"
+                )
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title=dm_title,
+                    message=(
+                        f"{error_message}\n\n"
+                        f"*Request ID:* `{approval_id}`\n"
+                        f"*{request_type.capitalize()}:* {item_title}"
+                    ),
+                )
+                short_status = (
+                    "Approval failed: Commander command not allowed. "
+                    "Re-run `slack-app-setup` and restart the service."
+                    if error_code == COMMAND_NOT_ALLOWED
+                    else "Approval failed: Commander authentication failed."
+                )
+                try:
+                    update_approval_message(
+                        client=client,
+                        channel_id=body["channel"]["id"],
+                        message_ts=body["message"]["ts"],
+                        status=short_status,
+                        original_blocks=body["message"]["blocks"],
+                    )
+                except Exception as update_error:
+                    logger.error(f"Failed to update approval card: {update_error}")
+                logger.error(
+                    f"Approval {approval_id}: Commander rejected ({error_code}). "
+                    "Notified approver via DM."
+                )
                 return
 
             # Check if user is the record owner

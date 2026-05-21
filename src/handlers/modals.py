@@ -14,7 +14,7 @@
 
 import json
 import requests
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from ..models import PermissionLevel, KDPermissionRole, RequestType
 from ..views import decode_search_item_value
 from ..views import update_approval_message, send_access_granted_dm, post_approval_request
@@ -25,7 +25,11 @@ from ..utils import (
     MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
     is_record_owner_error, is_permission_conflict_error
 )
+from ..commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
 from ..logger import logger
+
+
+_COMMANDER_REJECTED_CODES = (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED)
 
 
 def _send_ephemeral_response(response_url: str, text: str) -> bool:
@@ -45,6 +49,37 @@ def _send_ephemeral_response(response_url: str, text: str) -> bool:
     except Exception as e:
         logger.warning(f"Failed to send response via response_url: {e}")
         return False
+
+
+def _maybe_commander_search_error_banner(
+    client,
+    user_id: str,
+    search_error: Optional[Dict[str, Any]],
+    query: str,
+    search_type: str,
+) -> str:
+    """
+    If Commander rejected the search (HTTP 401/403), DM the user with the
+    admin-facing guidance and return a banner string ready to be passed as
+    `error_banner` to build_search_modal. Returns an empty string for any
+    other / no error so the caller can skip the banner block.
+    """
+    if not search_error:
+        return ""
+    if search_error.get("error_code") not in _COMMANDER_REJECTED_CODES:
+        return ""
+
+    from ..utils import notify_commander_unauthorized_or_forbidden
+
+    return notify_commander_unauthorized_or_forbidden(
+        client=client,
+        user_id=user_id,
+        error=search_error,
+        context_lines=[
+            f"*Search type:* {search_type}",
+            f"*Search query:* `{query}`",
+        ],
+    )
 
 
 def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper_client):
@@ -86,19 +121,34 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         request_type = approval_data.get("type", "record")
         exclude_pam = request_type == "one_time_share"
         if search_type == "record":
-            results = keeper_client.search_records(
+            results, search_error = keeper_client.search_records(
                 new_query, limit=20, exclude_pam=exclude_pam
             )
         else:
-            results = keeper_client.search_folders(new_query, limit=20)
-        
+            results, search_error = keeper_client.search_folders(
+                new_query, limit=20
+            )
+
+        # If Commander rejected the search (HTTP 401/403), DM the user with
+        # admin-facing guidance and surface the same message as a banner so
+        # the in-app modal matches the DM (mirrors the create-record /
+        # approval flows).
+        error_banner = _maybe_commander_search_error_banner(
+            client=client,
+            user_id=body["user"]["id"],
+            search_error=search_error,
+            query=new_query,
+            search_type=search_type,
+        )
+
         # Rebuild and update modal with results using API call
         from ..views import build_search_modal
         updated_modal = build_search_modal(
             query=new_query,
             search_type=search_type,
             results=results,
-            approval_data=approval_data
+            approval_data=approval_data,
+            error_banner=error_banner or None,
         )
         
         logger.debug(f"Updating modal with {len(results)} results")
@@ -516,7 +566,40 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     "rotation-not-configured banner via views_update"
                 )
                 return
-            
+
+            # Commander rejected the command (allowlist or auth issue).
+            # Modal already shows the friendly message via
+            # build_approval_error_modal below; also DM the approver so the
+            # guidance is durable even after they close the modal.
+            if error_code in (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED):
+                _show_modal_result(build_approval_error_modal(
+                    approval_id=approval_id,
+                    item_title=record_title,
+                    error_msg=error_msg,
+                    request_type=request_type,
+                ))
+                from ..utils import send_error_dm
+                dm_title = (
+                    "Commander Command Not Allowed"
+                    if error_code == COMMAND_NOT_ALLOWED
+                    else "Commander Authentication Failed"
+                )
+                send_error_dm(
+                    client=client,
+                    user_id=approver_id,
+                    title=dm_title,
+                    message=(
+                        f"{error_msg}\n\n"
+                        f"*Request ID:* `{approval_id}`\n"
+                        f"*{request_type.capitalize()}:* {record_title}"
+                    ),
+                )
+                logger.error(
+                    f"Approval {approval_id}: Commander rejected ({error_code}). "
+                    "Notified approver via modal + DM."
+                )
+                return
+
             _show_modal_result(build_approval_error_modal(
                 approval_id=approval_id,
                 item_title=record_title,
@@ -643,6 +726,153 @@ def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_cl
 
 
 
+def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle the 'Re-sync Vault' button in the search modal.
+
+    Runs Commander ``sync-down`` so records / folders created directly in the
+    Keeper Vault (web UI, mobile, etc.) become visible to this Slack app
+    without waiting for Commander Service Mode's background sync interval.
+    Once the sync finishes we re-run the current search and refresh the modal
+    in place. Errors are surfaced via the same DM + banner path used by
+    regular search 401 / 403 failures.
+    """
+    view = body["view"]
+    view_id = view["id"]
+    values = view["state"]["values"]
+    approval_data = json.loads(view["private_metadata"])
+
+    new_query = (
+        values.get("search_query", {})
+        .get("update_search_query", {})
+        .get("value", "")
+        or ""
+    ).strip()
+    search_type = approval_data.get("search_type", "record")
+    request_type = approval_data.get("type", "record")
+    exclude_pam = request_type == "one_time_share"
+    user_id = body["user"]["id"]
+
+    from ..views import build_search_modal
+
+    # Immediately swap the modal to a loading state so the user sees feedback
+    # while sync-down runs (can take tens of seconds on large vaults).
+    try:
+        client.views_update(
+            view_id=view_id,
+            view=build_search_modal(
+                query=new_query,
+                search_type=search_type,
+                results=[],
+                approval_data=approval_data,
+                loading=True,
+            ),
+        )
+    except Exception as e:
+        logger.debug(f"Could not show 'Syncing vault' state: {e}")
+
+    # Pull latest vault state into Commander's local cache.
+    logger.debug(f"Re-sync Vault triggered (search_type={search_type}, query='{new_query}')")
+    ok, sync_error = keeper_client.sync_down()
+
+    # Commander rejected sync-down (401 / 403) -> DM the admin + show banner.
+    sync_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=user_id,
+        search_error=sync_error,
+        query=new_query,
+        search_type=search_type,
+    )
+    if sync_banner:
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                    error_banner=sync_banner,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to surface sync-down Commander error: {e}")
+        return
+
+    # Sync failed for other reasons (timeout / non-401-403 / exception).
+    if not ok:
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                    error_banner=(
+                        "Vault sync took longer than expected. "
+                        "Showing cached results - try Re-sync Vault again in a moment."
+                    ),
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to surface sync-down timeout: {e}")
+        return
+
+    # Sync succeeded -> drop any stale selection and re-run the current search
+    # against the freshly synced cache.
+    approval_data.pop("selected_uid", None)
+    approval_data.pop("selected_is_keeper_drive", None)
+
+    if not new_query:
+        # No query yet - just refresh the modal so the user can type one.
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to refresh search modal after sync: {e}")
+        return
+
+    if search_type == "record":
+        results, search_error = keeper_client.search_records(
+            new_query, limit=20, exclude_pam=exclude_pam
+        )
+    else:
+        results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+    error_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=user_id,
+        search_error=search_error,
+        query=new_query,
+        search_type=search_type,
+    )
+
+    try:
+        client.views_update(
+            view_id=view_id,
+            view=build_search_modal(
+                query=new_query,
+                search_type=search_type,
+                results=results,
+                approval_data=approval_data,
+                error_banner=error_banner or None,
+            ),
+        )
+        logger.debug(
+            f"Re-sync Vault complete: {len(results)} result(s) for '{new_query}'"
+        )
+    except Exception as e:
+        logger.error(f"Failed to update search modal after sync: {e}")
+
+
 def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_client):
     """
     Handle 'Refine Search' button click in search modal.
@@ -667,19 +897,29 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     request_type = approval_data.get("type", "record")
     exclude_pam = request_type == "one_time_share"
     if search_type == "record":
-        results = keeper_client.search_records(
+        results, search_error = keeper_client.search_records(
             new_query, limit=20, exclude_pam=exclude_pam
         )
     else:
-        results = keeper_client.search_folders(new_query, limit=20)
-    
+        results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+    # DM admin + surface a banner when Commander rejected the search (401/403)
+    error_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=body["user"]["id"],
+        search_error=search_error,
+        query=new_query,
+        search_type=search_type,
+    )
+
     # Build updated modal
     from ..views import build_search_modal
     updated_modal = build_search_modal(
         query=new_query,
         search_type=search_type,
         results=results,
-        approval_data=approval_data
+        approval_data=approval_data,
+        error_banner=error_banner or None,
     )
     
     logger.debug(f"Updating modal with {len(results)} results")
@@ -696,7 +936,11 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
 
 def _is_classic_vault_checked(values: Dict[str, Any]) -> bool:
     """True if Classic vault checkbox is selected in create-record modal."""
-    selected = values.get("classic_vault", {}).get("classic_vault_checkbox", {}).get("selected_options", [])
+    selected = (
+        values.get("classic_vault", {})
+        .get("classic_vault_checkbox", {})
+        .get("selected_options", [])
+    )
     return any(opt.get("value") == "classic" for opt in selected)
 
 
@@ -876,16 +1120,53 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
             )
         
         if not create_result.get('success'):
-            # Show error in modal
             error_msg = create_result.get('error', 'Unknown error')
-            # Send DM with error since we can't easily show it in modal after ack
+            error_code = create_result.get('error_code')
             from ..utils import send_error_dm
             user_id = body["user"]["id"]
+            if error_code == COMMAND_NOT_ALLOWED:
+                dm_title = "Commander Command Not Allowed"
+                banner = (
+                    "Could not create record: Commander rejected the command. "
+                    "Check your DM for next steps."
+                )
+            elif error_code == COMMANDER_UNAUTHORIZED:
+                dm_title = "Commander Authentication Failed"
+                banner = (
+                    "Could not create record: Commander authentication failed. "
+                    "Check your DM for next steps."
+                )
+            else:
+                dm_title = "Failed to create record"
+                banner = f"Could not create record: {error_msg}"
             send_error_dm(
                 client, user_id,
-                "Failed to create record",
-                error_msg
+                dm_title,
+                error_msg,
             )
+
+            # Restore the underlying search modal so the admin is not left
+            # staring at the "Creating record..." loading view. We pop the
+            # admin back to their previous search context with a concise
+            # banner; the durable details live in the DM above.
+            if view_id:
+                try:
+                    from ..views import build_search_modal
+                    previous_query = metadata.get('query') or title
+                    cached_results = metadata.get('cached_results', [])
+                    restored_modal = build_search_modal(
+                        query=previous_query,
+                        search_type=search_type,
+                        results=cached_results,
+                        approval_data=metadata,
+                        loading=False,
+                        error_banner=banner,
+                    )
+                    client.views_update(view_id=view_id, view=restored_modal)
+                except Exception as restore_err:
+                    logger.warning(
+                        f"Failed to restore search modal after create error: {restore_err}"
+                    )
             return
         
         record_uid = create_result.get('record_uid')

@@ -17,6 +17,7 @@ from .search import handle_search_records, handle_search_folders
 from .modals import (
     handle_search_modal_submit,
     handle_refine_search_action,
+    handle_resync_vault_action,
     handle_item_selection_action,
     handle_create_new_record_action,
     handle_create_record_classic_vault_action,
@@ -31,6 +32,7 @@ __all__ = [
     'handle_search_folders',
     'handle_search_modal_submit',
     'handle_refine_search_action',
+    'handle_resync_vault_action',
     'handle_item_selection_action',
     'handle_create_new_record_action',
     'handle_create_record_classic_vault_action',
