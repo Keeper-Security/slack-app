@@ -18,7 +18,7 @@ All backend Logic is being written in this module.
 import requests
 import shlex
 import re
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 
 from .models import (
@@ -29,6 +29,7 @@ from .models import (
 from .config import KeeperConfig
 from .logger import logger
 from .utils import is_pam_record_type
+from .commander_errors import log_submit_warning, submit_error
 
 
 class KeeperClient:
@@ -1448,6 +1449,58 @@ class KeeperClient:
             logger.error(f"Exception listing subfolders: {e}", exc_info=True)
             return []
     
+    def sync_down(self) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Pull the latest vault state into Commander Service Mode's local cache
+        so records / folders created in the Keeper web UI (or any other
+        client) become searchable from the Slack app without waiting for
+        Commander's background sync interval.
+
+        Returns a ``(success, error)`` tuple. ``error`` is ``None`` unless
+        Commander rejected the submit with HTTP 401 / 403 (or another
+        non-202 status), in which case it matches ``submit_error()``'s shape
+        so callers can DM / banner the admin with the same actionable
+        guidance used elsewhere.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": "sync-down"},
+                timeout=10,
+            )
+
+            if response.status_code != 202:
+                log_submit_warning(response.status_code, "sync-down")
+                return False, submit_error(response.status_code)
+
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for sync-down")
+                return False, None
+
+            # Vault sync-down can be slow on large vaults; give it room.
+            result_data = self._poll_for_result(request_id, max_wait=45)
+
+            if not result_data:
+                logger.warning("sync-down command timed out")
+                return False, None
+
+            status = result_data.get('status')
+            if status == 'error':
+                error_msg = result_data.get('message', 'Unknown error')
+                logger.error(f"sync-down failed: {error_msg}")
+                return False, None
+
+            if status == 'success':
+                logger.ok("Vault synced from server")
+                return True, None
+
+            return False, None
+
+        except Exception as e:
+            logger.error(f"Exception in sync_down: {e}", exc_info=True)
+            return False, None
+
     def sync_pedm_data(self) -> bool:
         """
         Sync PEDM data from server.

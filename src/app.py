@@ -35,6 +35,7 @@ from .handlers import (
     handle_search_folders,
     handle_search_modal_submit,
     handle_refine_search_action,
+    handle_resync_vault_action,
     handle_approve_pedm_request,
     handle_deny_pedm_request,
 )
@@ -317,7 +318,23 @@ class KeeperSlackApp:
         def action_refine_search(ack, body, client):
             ack()
             handle_refine_search_action(body, client, self.config, self.keeper_client)
-        
+
+        @self.slack_app.action("resync_vault_action")
+        def action_resync_vault(ack, body, client):
+            """
+            Handle the Re-sync Vault button (accessory on the results line).
+            Ack immediately within Slack's 3s window; the handler runs
+            Commander ``sync-down`` + re-runs the current search and updates
+            the modal in place via ``views_update``.
+            """
+            ack()
+            try:
+                handle_resync_vault_action(body, client, self.config, self.keeper_client)
+            except Exception as e:
+                logger.error(f"Failed to handle Re-sync Vault action: {e}")
+                import traceback
+                traceback.print_exc()
+
         @self.slack_app.action("create_new_record_action")
         def action_create_new_record(ack, body, client):
             ack()

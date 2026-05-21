@@ -579,15 +579,35 @@ def build_search_modal(
             }]
         })
     
+    # Results-count line doubles as the anchor for the "Re-sync Vault" button:
+    # rendering it as a section + accessory keeps the button visually attached
+    # to the line it controls (refresh the current search/list) without taking
+    # up its own row, and lets us hide the accessory during the loading state
+    # so a slow sync can't be double-triggered.
+    results_text = (
+        "_Searching..._"
+        if loading
+        else f"_Showing {len(results)} result(s) for: `{query}`_"
+    )
+    results_block: Dict[str, Any] = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": results_text},
+    }
+    if not loading:
+        results_block["accessory"] = {
+            "type": "button",
+            "text": {
+                "type": "plain_text",
+                "text": ":arrows_counterclockwise: Re-sync Vault",
+                "emoji": True,
+            },
+            "action_id": "resync_vault_action",
+            "value": json.dumps(button_metadata),
+            "accessibility_label": "Re-sync vault to fetch records created in the Keeper Vault",
+        }
     blocks.extend([
-        {
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": f"_{'Searching...' if loading else f'Showing {len(results)} result(s) for: `{query}`'}_"
-            }]
-        },
-        {"type": "divider"}
+        results_block,
+        {"type": "divider"},
     ])
     
     if results:

@@ -14,9 +14,10 @@
 
 import json
 import requests
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from ..models import PermissionLevel, RequestType
 from ..views import update_approval_message, send_access_granted_dm, post_approval_request
+from ..commander_errors import COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED
 from ..utils import (
     parse_duration_to_seconds, format_duration, get_user_email_from_slack,
     generate_approval_id, is_valid_uid, sanitize_user_input,
@@ -24,6 +25,40 @@ from ..utils import (
     is_record_owner_error, is_permission_conflict_error
 )
 from ..logger import logger
+
+
+_COMMANDER_REJECTED_CODES = (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED)
+
+
+def _maybe_commander_search_error_banner(
+    client,
+    user_id: str,
+    search_error: Optional[Dict[str, Any]],
+    query: str,
+    search_type: str,
+) -> str:
+    """
+    If Commander rejected the search/sync (HTTP 401/403), DM the user with
+    the admin-facing guidance and return a banner string ready to be passed
+    as ``error_banner`` to ``build_search_modal``. Returns an empty string
+    for any other / no error so the caller can skip the banner block.
+    """
+    if not search_error:
+        return ""
+    if search_error.get("error_code") not in _COMMANDER_REJECTED_CODES:
+        return ""
+
+    from ..utils import notify_commander_unauthorized_or_forbidden
+
+    return notify_commander_unauthorized_or_forbidden(
+        client=client,
+        user_id=user_id,
+        error=search_error,
+        context_lines=[
+            f"*Search type:* {search_type}",
+            f"*Search query:* `{query}`",
+        ],
+    )
 
 
 def _send_ephemeral_response(response_url: str, text: str) -> bool:
@@ -661,6 +696,143 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             "System Error",
             f"An error occurred while processing your approval: {str(e)}"
         )
+
+
+def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_client):
+    """
+    Handle the 'Re-sync Vault' button in the search modal.
+
+    Runs Commander ``sync-down`` so records / folders created directly in the
+    Keeper Vault (web UI, mobile, etc.) become visible to this Slack app
+    without waiting for Commander Service Mode's background sync interval.
+    Once the sync finishes we re-run the current search and refresh the modal
+    in place. Errors are surfaced via the same DM + banner path used by
+    regular Commander 401 / 403 failures.
+    """
+    view = body["view"]
+    view_id = view["id"]
+    values = view["state"]["values"]
+    approval_data = json.loads(view["private_metadata"])
+
+    new_query = (
+        values.get("search_query", {})
+        .get("update_search_query", {})
+        .get("value", "")
+        or ""
+    ).strip()
+    search_type = approval_data.get("search_type", "record")
+    request_type = approval_data.get("type", "record")
+    exclude_pam = request_type == "one_time_share"
+    user_id = body["user"]["id"]
+
+    from ..views import build_search_modal
+
+    # Immediately swap the modal to a loading state so the user sees feedback
+    # while sync-down runs (can take tens of seconds on large vaults).
+    try:
+        client.views_update(
+            view_id=view_id,
+            view=build_search_modal(
+                query=new_query,
+                search_type=search_type,
+                results=[],
+                approval_data=approval_data,
+                loading=True,
+            ),
+        )
+    except Exception as e:
+        logger.debug(f"Could not show 'Syncing vault' state: {e}")
+
+    # Pull latest vault state into Commander's local cache.
+    logger.debug(f"Re-sync Vault triggered (search_type={search_type}, query='{new_query}')")
+    ok, sync_error = keeper_client.sync_down()
+
+    # Commander rejected sync-down (401 / 403) -> DM the admin + show banner.
+    sync_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=user_id,
+        search_error=sync_error,
+        query=new_query,
+        search_type=search_type,
+    )
+    if sync_banner:
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                    error_banner=sync_banner,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to surface sync-down Commander error: {e}")
+        return
+
+    # Sync failed for other reasons (timeout / non-401-403 / exception).
+    if not ok:
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                    error_banner=(
+                        "Vault sync took longer than expected. "
+                        "Showing cached results - try Re-sync Vault again in a moment."
+                    ),
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to surface sync-down timeout: {e}")
+        return
+
+    # Sync succeeded -> drop any stale selection and re-run the current search
+    # against the freshly synced cache.
+    approval_data.pop("selected_uid", None)
+
+    if not new_query:
+        # No query yet - just refresh the modal so the user can type one.
+        try:
+            client.views_update(
+                view_id=view_id,
+                view=build_search_modal(
+                    query=new_query,
+                    search_type=search_type,
+                    results=[],
+                    approval_data=approval_data,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to refresh search modal after sync: {e}")
+        return
+
+    if search_type == "record":
+        results = keeper_client.search_records(
+            new_query, limit=20, exclude_pam=exclude_pam
+        )
+    else:
+        results = keeper_client.search_folders(new_query, limit=20)
+
+    try:
+        client.views_update(
+            view_id=view_id,
+            view=build_search_modal(
+                query=new_query,
+                search_type=search_type,
+                results=results,
+                approval_data=approval_data,
+            ),
+        )
+        logger.debug(
+            f"Re-sync Vault complete: {len(results)} result(s) for '{new_query}'"
+        )
+    except Exception as e:
+        logger.error(f"Failed to update search modal after sync: {e}")
 
 
 def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_client):
