@@ -121,7 +121,7 @@ def handle_request_record(body: Dict[str, Any], client, respond, config, keeper_
             is_uid=is_uid,
             request_type=RequestType.RECORD,
             justification=justification,
-            duration="1h",
+            duration="5m",
             record_details=record_details
         )
 

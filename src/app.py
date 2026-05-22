@@ -256,6 +256,42 @@ class KeeperSlackApp:
                             if "Folder" in header_text:
                                 request_type = RequestType.FOLDER
                             break
+                    is_pam_target = any(
+                        b.get("block_id") == "pam_rotate_actions" for b in blocks
+                    )
+
+                    previous_duration_value = "5m"
+                    raw_state = body.get("state")
+                    state_values = (
+                        raw_state.get("values", {})
+                        if isinstance(raw_state, dict)
+                        else {}
+                    )
+                    state_candidate = None
+                    for _bid, block_values in state_values.items():
+                        if not isinstance(block_values, dict):
+                            continue
+                        select_action = block_values.get("select_duration")
+                        if not select_action:
+                            continue
+                        selected = select_action.get("selected_option") or {}
+                        candidate = selected.get("value")
+                        if candidate:
+                            state_candidate = candidate
+                            break
+                    if state_candidate:
+                        previous_duration_value = state_candidate
+                    else:
+                        for b in blocks:
+                            if b.get("block_id") != "duration_selector":
+                                continue
+                            existing_initial = (
+                                b.get("accessory", {}).get("initial_option") or {}
+                            )
+                            candidate = existing_initial.get("value")
+                            if candidate:
+                                previous_duration_value = candidate
+                            break
                     
                     # Rebuild blocks with updated duration visibility
                     new_blocks = []
@@ -279,6 +315,28 @@ class KeeperSlackApp:
                             new_blocks.append(block)  # Keep permission selector
                             
                             if show_duration:
+                                duration_options = get_duration_options(
+                                    exclude_permanent=is_pam_target
+                                )
+                                # If "No Expiration" is filtered out but the
+                                # previous selection was permanent, fall back
+                                # to 5m so initial_option always resolves.
+                                effective_duration_value = previous_duration_value
+                                if (
+                                    is_pam_target
+                                    and effective_duration_value == "permanent"
+                                ):
+                                    effective_duration_value = "5m"
+                                duration_initial = next(
+                                    (
+                                        opt for opt in duration_options
+                                        if opt.get("value") == effective_duration_value
+                                    ),
+                                    {
+                                        "text": {"type": "plain_text", "text": "5 minutes"},
+                                        "value": "5m",
+                                    },
+                                )
                                 new_blocks.append({
                                     "type": "section",
                                     "block_id": "duration_selector",
@@ -286,8 +344,8 @@ class KeeperSlackApp:
                                     "accessory": {
                                         "type": "static_select",
                                         "action_id": "select_duration",
-                                        "options": get_duration_options(),
-                                        "initial_option": {"text": {"type": "plain_text", "text": "1 hour"}, "value": "1h"}
+                                        "options": duration_options,
+                                        "initial_option": duration_initial,
                                     }
                                 })
                             else:
@@ -305,7 +363,12 @@ class KeeperSlackApp:
                         blocks=new_blocks,
                         text="Access Request"
                     )
-                    logger.info(f"Updated message: show_duration={show_duration} for permission={selected_permission}")
+                    logger.info(
+                        f"Updated message: show_duration={show_duration} for "
+                        f"permission={selected_permission} "
+                        f"(is_pam_target={is_pam_target}, "
+                        f"preserved_duration={previous_duration_value})"
+                    )
                     
             except Exception as e:
                 logger.error(f"Failed to update on permission change: {e}")

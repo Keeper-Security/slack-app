@@ -43,9 +43,10 @@ def post_approval_request(
     is_uid: bool,
     request_type: RequestType,
     justification: str,
-    duration: str = "1h",
+    duration: str = "5m",
     record_details = None,
-    folder_details = None
+    folder_details = None,
+    is_pam_user_folder: bool = False,
 ):
     """
     Post approval request message to approvals channel.
@@ -138,7 +139,21 @@ def post_approval_request(
     else:
         # UID provided - add permission selector
         blocks.append(build_permission_selector_block(request_type))
-    
+
+        # Detect PAM-user targets once - drives both the duration filter
+        # ("No Expiration" is incompatible with rotate-on-expire) and the
+        # rotate-on-expire checkbox below.
+        is_pam_user_record = (
+            request_type == RequestType.RECORD
+            and record_details
+            and is_pam_user_record_type(record_details.record_type)
+        )
+        is_pam_folder = (
+            request_type == RequestType.FOLDER
+            and bool(is_pam_user_folder)
+        )
+        is_pam_target = bool(is_pam_user_record or is_pam_folder)
+
         # Add duration selector for approver
         blocks.append({
             "type": "section",
@@ -154,25 +169,26 @@ def post_approval_request(
                     "type": "plain_text",
                     "text": "Select duration"
                 },
-                "options": get_duration_options(),
+                "options": get_duration_options(exclude_permanent=is_pam_target),
                 "initial_option": {
-                    "text": {"type": "plain_text", "text": "1 hour"},
-                    "value": "1h"
+                    "text": {"type": "plain_text", "text": "5 minutes"},
+                    "value": "5m"
                 }
             }
         })
 
-        if (
-            request_type == RequestType.RECORD
-            and record_details
-            and is_pam_user_record_type(record_details.record_type)
-        ):
+        if is_pam_target:
             blocks.append(build_pam_rotate_on_expire_block())
+            hint_text = (
+                "_PAM User record: credentials will rotate when time-limited access expires (rotation must be configured on the record)._"
+                if is_pam_user_record
+                else "_PAM User folder: credentials in this folder will rotate when time-limited access expires (rotation must be configured on the underlying records)._"
+            )
             blocks.append({
                 "type": "context",
                 "elements": [{
                     "type": "mrkdwn",
-                    "text": "_PAM User record: credentials will rotate when time-limited access expires (rotation must be configured on the record)._",
+                    "text": hint_text,
                 }],
             })
             action_data["is_pam"] = True
@@ -617,6 +633,13 @@ def build_search_modal(
         newly_created_uid = approval_data.get('newly_created_uid')
         selected_uid = approval_data.get('selected_uid')
         selected_record_is_pam_user = False
+        # Folder-side PAM detection is lazy I/O and lives in the item-selection
+        # handler; the result is cached in approval_data so the same key flows
+        # through to subsequent rerenders.
+        selected_folder_is_pam_user = bool(
+            search_type == "folder"
+            and approval_data.get('selected_folder_is_pam_user', False)
+        )
 
         for item in results[:10]:  # Limit to 10 for UX
             # Handle both objects (KeeperRecord/KeeperFolder) and dicts (cached results)
@@ -647,6 +670,11 @@ def build_search_modal(
                     selected_record_is_pam_user = True
             elif not selected_uid and newly_created_uid and value == newly_created_uid:
                 initial_option = option
+
+        # Single combined flag drives duration filtering + rotate checkbox.
+        selected_target_is_pam = bool(
+            selected_record_is_pam_user or selected_folder_is_pam_user
+        )
         
         # If we have a newly created record, add context message
         if initial_option and not selected_uid:
@@ -700,14 +728,24 @@ def build_search_modal(
             
             # Add duration selector (conditionally based on permission)
             if show_duration:
-                duration_options = get_duration_options()
+                # For PAM user targets (records or folders), "No Expiration"
+                # is incompatible with rotate-on-expire and is hidden.
+                duration_options = get_duration_options(
+                    exclude_permanent=selected_target_is_pam
+                )
+                # If the previously selected duration was "permanent" but we
+                # just switched to a PAM user target, fall back to 5 minutes
+                # so the initial_option always resolves to something in the list.
+                effective_duration = selected_duration
+                if selected_target_is_pam and effective_duration == "permanent":
+                    effective_duration = "5m"
                 duration_initial = {
-                    "text": {"type": "plain_text", "text": "1 hour"},
-                    "value": "1h",
+                    "text": {"type": "plain_text", "text": "5 minutes"},
+                    "value": "5m",
                 }
-                if selected_duration:
+                if effective_duration:
                     for opt in duration_options:
-                        if opt.get("value") == selected_duration:
+                        if opt.get("value") == effective_duration:
                             duration_initial = opt
                             break
                 blocks.append({
@@ -727,9 +765,8 @@ def build_search_modal(
                     }
                 })
                 if (
-                    search_type == "record"
-                    and request_type != RequestType.ONE_TIME_SHARE
-                    and selected_record_is_pam_user
+                    request_type != RequestType.ONE_TIME_SHARE
+                    and selected_target_is_pam
                 ):
                     blocks.append(
                         build_pam_rotate_on_expire_block(
@@ -737,11 +774,16 @@ def build_search_modal(
                             initial_checked=rotate_initial_checked,
                         )
                     )
+                    hint_text = (
+                        "_Selected PAM User record: credentials rotate when time-limited access expires (rotation must be configured on the record)._"
+                        if selected_record_is_pam_user
+                        else "_Selected PAM User folder: credentials in this folder will rotate when time-limited access expires (rotation must be configured on the underlying records)._"
+                    )
                     blocks.append({
                         "type": "context",
                         "elements": [{
                             "type": "mrkdwn",
-                            "text": "_Selected PAM User record: credentials rotate when time-limited access expires (rotation must be configured on the record)._",
+                            "text": hint_text,
                         }],
                     })
             else:
@@ -979,30 +1021,18 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "action_id": "expiration_select",
                 "placeholder": {"type": "plain_text", "text": "Select expiration time"},
                 "initial_option": {
-                    "text": {"type": "plain_text", "text": "1 hour"},
-                    "value": "1h"
+                    "text": {"type": "plain_text", "text": "5 minutes"},
+                    "value": "5m"
                 },
                 "options": [
-                    {
-                        "text": {"type": "plain_text", "text": "1 hour"},
-                        "value": "1h"
-                    },
-                    {
-                        "text": {"type": "plain_text", "text": "24 hours"},
-                        "value": "24h"
-                    },
-                    {
-                        "text": {"type": "plain_text", "text": "1 week"},
-                        "value": "7d"
-                    },
-                    {
-                        "text": {"type": "plain_text", "text": "30 days"},
-                        "value": "30d"
-                    },
-                    {
-                        "text": {"type": "plain_text", "text": "90 days"},
-                        "value": "90d"
-                    }
+                    {"text": {"type": "plain_text", "text": "5 minutes"},  "value": "5m"},
+                    {"text": {"type": "plain_text", "text": "10 minutes"}, "value": "10m"},
+                    {"text": {"type": "plain_text", "text": "30 minutes"}, "value": "30m"},
+                    {"text": {"type": "plain_text", "text": "1 hour"},     "value": "1h"},
+                    {"text": {"type": "plain_text", "text": "24 hours"},   "value": "24h"},
+                    {"text": {"type": "plain_text", "text": "1 week"},     "value": "7d"},
+                    {"text": {"type": "plain_text", "text": "30 days"},    "value": "30d"},
+                    {"text": {"type": "plain_text", "text": "90 days"},    "value": "90d"},
                 ]
             }
         })

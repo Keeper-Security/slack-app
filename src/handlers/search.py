@@ -18,6 +18,39 @@ from ..views import build_search_modal
 from ..logger import logger
 
 
+def _block_self_approval(body: Dict[str, Any], client, action_data: Dict[str, Any]) -> bool:
+    """
+    Refuse Search-button clicks where the clicker is also the requester.
+    """
+    approver_id = body.get("user", {}).get("id")
+    requester_id = action_data.get("requester_id")
+    if not (approver_id and requester_id and approver_id == requester_id):
+        return False
+
+    channel_id = (
+        (body.get("channel") or {}).get("id")
+        or (body.get("container") or {}).get("channel_id")
+    )
+    if channel_id:
+        try:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=approver_id,
+                text=(
+                    ":no_entry_sign: You cannot approve your own request. "
+                    "Please ask your admin or another team member to "
+                    "review and approve it on your behalf."
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Could not send self-approval ephemeral to {approver_id}: {e}")
+    else:
+        logger.warning(
+            f"Self-approval blocked for {approver_id} but no channel_id found to send ephemeral"
+        )
+    return True
+
+
 def handle_search_records(body: Dict[str, Any], client, config, keeper_client):
     """
     Handle search records button click.
@@ -27,7 +60,12 @@ def handle_search_records(body: Dict[str, Any], client, config, keeper_client):
     
     # Extract approval data from button value
     action_data = json.loads(body["actions"][0]["value"])
-    
+
+    # Block self-approval before opening the modal (no trigger_id is consumed
+    # and the approval card stays intact for legitimate approvers).
+    if _block_self_approval(body, client, action_data):
+        return
+
     # Include message_ts and channel for updating the approval card later
     action_data["message_ts"] = body["message"]["ts"]
     action_data["channel_id"] = body["channel"]["id"]
@@ -93,6 +131,11 @@ def handle_search_folders(body: Dict[str, Any], client, config, keeper_client):
     
     # Extract approval data from button value
     action_data = json.loads(body["actions"][0]["value"])
+
+    # Block self-approval before opening the modal (no trigger_id is consumed
+    # and the approval card stays intact for legitimate approvers).
+    if _block_self_approval(body, client, action_data):
+        return
     
     # Include message_ts and channel for updating the approval card later
     action_data["message_ts"] = body["message"]["ts"]

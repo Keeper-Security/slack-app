@@ -103,16 +103,43 @@ def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_cl
         if not selected_uid:
             return
 
+        previous_selected_uid = metadata.get("selected_uid")
         metadata["selected_uid"] = selected_uid
+
+        search_type = metadata.get("search_type", "record")
+        pam_folder_error: Optional[Dict[str, Any]] = None
+        if search_type == "folder":
+            if selected_uid != previous_selected_uid:
+                try:
+                    is_pam_folder, pam_folder_error = (
+                        keeper_client.is_pam_user_folder(selected_uid)
+                    )
+                    metadata["selected_folder_is_pam_user"] = is_pam_folder
+                except Exception as e:
+                    logger.warning(
+                        f"item_selection: is_pam_user_folder({selected_uid}) "
+                        f"failed; falling back to non-PAM: {e}"
+                    )
+                    metadata["selected_folder_is_pam_user"] = False
+                    pam_folder_error = None
 
         from ..views import build_search_modal
 
+        pam_folder_banner = _maybe_commander_search_error_banner(
+            client=client,
+            user_id=body.get("user", {}).get("id", ""),
+            search_error=pam_folder_error,
+            query=metadata.get("query", ""),
+            search_type=search_type,
+        )
+
         updated_modal = build_search_modal(
             query=metadata.get("query", ""),
-            search_type=metadata.get("search_type", "record"),
+            search_type=search_type,
             results=metadata.get("cached_results", []),
             approval_data=metadata,
             loading=False,
+            error_banner=pam_folder_banner or None,
         )
 
         client.views_update(view_id=view_id, view=updated_modal)
@@ -143,6 +170,38 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     has_results = selected_item_block is not None
     
     logger.debug(f"Has results block: {has_results}")
+
+    # Defense-in-depth self-approval guard: if a requester somehow opened the modal for their own request, refuse to grant access.
+    approver_id = body.get("user", {}).get("id")
+    requester_id = approval_data.get("requester_id")
+    if has_results and approver_id and requester_id and approver_id == requester_id:
+        try:
+            ack(
+                response_action="update",
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Cannot Self-Approve"},
+                    "close": {"type": "plain_text", "text": "Close"},
+                    "blocks": [{
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                ":no_entry_sign: *You cannot approve your own request.*\n\n"
+                                "Please ask your admin or another team member "
+                                "to review and approve it on your behalf."
+                            ),
+                        },
+                    }],
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Could not surface self-approval error in modal: {e}")
+        logger.info(
+            f"Blocked self-approval via search modal: approver_id={approver_id} "
+            f"== requester_id={requester_id}"
+        )
+        return
     
     if not has_results:
         # No results yet - user is searching
@@ -151,8 +210,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         # Acknowledge immediately for search operations
         ack()
 
-        # Drop any prior selection when running a new search
+        # Drop any prior selection (and its derived PAM-folder cache) when
+        # running a new search so the next render starts clean.
         approval_data.pop("selected_uid", None)
+        approval_data.pop("selected_folder_is_pam_user", None)
         
         # Run search
         request_type = approval_data.get("type", "record")
@@ -211,10 +272,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     # Item selected - acknowledge IMMEDIATELY (Slack requires ack within 3 seconds).
     pre_ack_request_type = approval_data.get("type", "record")
     pre_ack_is_self_destruct = approval_data.get("create_self_destruct", False)
+
     defer_ack = (
-        pre_ack_request_type == "record"
+        pre_ack_request_type in ("record", "folder")
         and not pre_ack_is_self_destruct
-        and bool(values.get("pam_rotate_block"))
     )
     submitted_view_id = body["view"]["id"]
 
@@ -225,7 +286,8 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             view=build_grant_processing_modal(),
         )
         logger.debug(
-            "Deferred ack with processing modal (rotate checkbox in scope); "
+            f"Deferred ack with processing modal for {pre_ack_request_type} "
+            f"share (sync-down + share command in flight); "
             f"view_id={submitted_view_id}"
         )
     else:
@@ -246,7 +308,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         # Self-destruct records: use duration from creation, always view-only
         logger.info("Self-destruct record detected - sharing with view-only access")
         permission = PermissionLevel.VIEW_ONLY
-        self_destruct_duration_str = approval_data.get('self_destruct_duration', '1h')
+        self_destruct_duration_str = approval_data.get('self_destruct_duration', '5m')
         duration_seconds = parse_duration_to_seconds(self_destruct_duration_str)
         duration_value = self_destruct_duration_str
         duration_text = format_duration(self_destruct_duration_str)
@@ -313,8 +375,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
 
     rotate_on_expire = False
     if (
-        request_type == "record"
-        and duration_seconds
+        duration_seconds
         and not is_self_destruct
         and values.get("pam_rotate_block")
     ):
@@ -322,9 +383,24 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             extract_rotate_on_expire_from_modal,
             is_pam_user_record_type,
         )
-        record_for_rotate = keeper_client.get_record_by_uid(selected_uid)
-        if record_for_rotate and is_pam_user_record_type(record_for_rotate.record_type):
-            rotate_on_expire = extract_rotate_on_expire_from_modal(values)
+        if request_type == "record":
+            record_for_rotate = keeper_client.get_record_by_uid(selected_uid)
+            if record_for_rotate and is_pam_user_record_type(record_for_rotate.record_type):
+                rotate_on_expire = extract_rotate_on_expire_from_modal(values)
+        elif request_type == "folder":
+            cached_is_pam_folder = approval_data.get("selected_folder_is_pam_user")
+            if cached_is_pam_folder is None:
+                try:
+                    cached_is_pam_folder, _ = (
+                        keeper_client.is_pam_user_folder(selected_uid)
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"is_pam_user_folder re-check failed for {selected_uid}: {e}"
+                    )
+                    cached_is_pam_folder = False
+            if cached_is_pam_folder:
+                rotate_on_expire = extract_rotate_on_expire_from_modal(values)
     
     try:
         if request_type == "record":
@@ -340,7 +416,8 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 folder_uid=selected_uid,
                 user_email=user_email,
                 permission=permission,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
+                rotate_on_expire=rotate_on_expire,
             )
         elif request_type == "one_time_share":
             # Create one-time share link with editable permission
@@ -544,14 +621,20 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 if duration_seconds and duration_value not in (None, 'permanent'):
                     retry_approval_data['selected_duration'] = duration_value
                 retry_approval_data['rotate_initial_checked'] = False
+                retry_search_type = approval_data.get('search_type', 'record')
+                rotation_subject = (
+                    "PAM User record"
+                    if retry_search_type == 'record'
+                    else "PAM User folder"
+                )
                 retry_modal = build_search_modal(
                     query=approval_data.get('query', ''),
-                    search_type=approval_data.get('search_type', 'record'),
+                    search_type=retry_search_type,
                     results=cached_results,
                     approval_data=retry_approval_data,
                     loading=False,
                     error_banner=(
-                        "Rotation is not configured on this PAM User record. "
+                        f"Rotation is not configured on this {rotation_subject}. "
                         "Configure rotation in the Keeper Vault, or keep "
                         "*Rotate credentials when access expires* unchecked and approve again."
                     ),
@@ -794,6 +877,7 @@ def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_clie
     # Sync succeeded -> drop any stale selection and re-run the current search
     # against the freshly synced cache.
     approval_data.pop("selected_uid", None)
+    approval_data.pop("selected_folder_is_pam_user", None)
 
     if not new_query:
         # No query yet - just refresh the modal so the user can type one.
@@ -851,8 +935,10 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     
     logger.debug(f"Refining search with query: '{new_query}'")
 
-    # Drop any prior selection when running a new search
+    # Drop any prior selection (and PAM-folder cache derived from it) when
+    # running a new search.
     approval_data.pop("selected_uid", None)
+    approval_data.pop("selected_folder_is_pam_user", None)
     
     # Re-run search
     request_type = approval_data.get("type", "record")
@@ -1181,7 +1267,7 @@ def handle_request_record_modal_submit(body: Dict[str, Any], client, config, kee
             is_uid=is_uid,
             request_type=RequestType.RECORD,
             justification=justification,
-            duration="1h",
+            duration="5m",
             record_details=record_details
         )
         logger.info(f"Record access request {approval_id} submitted via modal by {user_id}")
@@ -1249,6 +1335,7 @@ def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, kee
     
     # Fetch folder details if UID
     folder_details = None
+    is_pam_user_folder = False
     if is_uid:
         folder_details = keeper_client.get_folder_by_uid(identifier)
         if not folder_details:
@@ -1257,6 +1344,33 @@ def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, kee
         # Validate it's actually a folder, not a record
         if folder_details.folder_type == 'record':
             return {"response_action": "errors", "errors": {"folder_identifier": "This is a record. Please use /keeper-request-record instead."}}
+
+        # Detect PAM-user folder for the rotate-on-expire feature
+
+        try:
+            is_pam_user_folder, pam_folder_error = (
+                keeper_client.is_pam_user_folder(identifier)
+            )
+        except Exception as e:
+            logger.warning(
+                f"is_pam_user_folder detection failed for {identifier}: {e}"
+            )
+            is_pam_user_folder = False
+            pam_folder_error = None
+
+        # Commander rejected list-sf (allowlist / auth). DM the requester
+        if pam_folder_error:
+            from ..utils import notify_commander_unauthorized_or_forbidden
+            error_msg = notify_commander_unauthorized_or_forbidden(
+                client=client,
+                user_id=user_id,
+                error=pam_folder_error,
+                context_lines=[f"*Folder UID:* `{identifier}`"],
+            )
+            return {
+                "response_action": "errors",
+                "errors": {"folder_identifier": error_msg},
+            }
     
     # Generate approval ID and post request
     approval_id = generate_approval_id()
@@ -1272,8 +1386,9 @@ def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, kee
             is_uid=is_uid,
             request_type=RequestType.FOLDER,
             justification=justification,
-            duration="1h",
-            folder_details=folder_details
+            duration="5m",
+            folder_details=folder_details,
+            is_pam_user_folder=is_pam_user_folder,
         )
         logger.info(f"Folder access request {approval_id} submitted via modal by {user_id}")
         
@@ -1363,7 +1478,7 @@ def handle_one_time_share_modal_submit(body: Dict[str, Any], client, config, kee
             is_uid=is_uid,
             request_type=RequestType.ONE_TIME_SHARE,
             justification=justification,
-            duration="1h",
+            duration="5m",
             record_details=record_details
         )
         logger.info(f"One-time share request {approval_id} submitted via modal by {user_id}")
