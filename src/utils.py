@@ -212,6 +212,16 @@ def format_timestamp(dt: Optional[datetime] = None) -> str:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
+def format_slack_local_time(dt: datetime) -> str:
+    """
+    Format a datetime as a Slack ``<!date^…>`` token so each viewer sees the
+    value rendered in their own timezone and date/time preferences.
+    """
+    unix_ts = int(dt.timestamp())
+    fallback = dt.strftime('%Y-%m-%d %H:%M:%S')
+    return f"<!date^{unix_ts}^{{date_short_pretty}} at {{time}}|{fallback}>"
+
+
 def truncate_text(text: str, max_length: int = 100) -> str:
     """
     Truncate text to maximum length with ellipsis.

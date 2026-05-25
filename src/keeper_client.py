@@ -28,7 +28,7 @@ from .models import (
 )
 from .config import KeeperConfig
 from .logger import logger
-from .utils import is_pam_record_type
+from .utils import is_pam_record_type, format_slack_local_time
 from .commander_errors import log_submit_warning, submit_error
 
 
@@ -627,7 +627,8 @@ class KeeperClient:
                 expire_in = self._format_duration(duration_seconds)
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                # Render in each Slack viewer's local timezone instead of server time.
+                expires_at_str = format_slack_local_time(expires_at)
                 if rotate_on_expire:
                     cmd_parts.append("--rotate-on-expiration")
             else:
@@ -708,10 +709,22 @@ class KeeperClient:
 
                 error_lower = error_msg.lower()
 
-                if (
+                is_rotation_not_configured = (
                     "rotation must be already set" in error_lower
-                    or ("rotate" in error_lower and "expiration" in error_lower and "set on the record" in error_lower)
-                ):
+                    or (
+                        "rotate" in error_lower
+                        and "expiration" in error_lower
+                        and "set on the record" in error_lower
+                    )
+                    or (
+                        "--rotate-on-expiration" in error_lower
+                        and (
+                            "requires" in error_lower
+                            or "ineligible" in error_lower
+                        )
+                    )
+                )
+                if is_rotation_not_configured:
                     return {
                         'success': False,
                         'error_code': 'pam_rotation_not_configured',
@@ -833,7 +846,8 @@ class KeeperClient:
                 expire_in = self._format_duration(duration_seconds)
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                # Render in each Slack viewer's local timezone instead of server time.
+                expires_at_str = format_slack_local_time(expires_at)
                 # Rotate PAM credentials when the time-limited share expires.
                 if rotate_on_expire:
                     cmd_parts.append("--rotate-on-expiration")
@@ -928,7 +942,6 @@ class KeeperClient:
 
                 error_lower = error_msg.lower()
 
-                # Surface a structured error_code so the modal/approval handlers
                 if (
                     "rotation must be already set" in error_lower
                     or ("rotate" in error_lower and "expiration" in error_lower and "set on the record" in error_lower)
@@ -1201,7 +1214,8 @@ class KeeperClient:
                 # Calculate expiration time
                 if duration_seconds:
                     expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                    expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                    # Render in each Slack viewer's local timezone instead of server time.
+                    expires_at_str = format_slack_local_time(expires_at)
                 else:
                     expires_at_str = "Never (7 days default)"
                 

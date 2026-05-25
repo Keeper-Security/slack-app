@@ -380,7 +380,7 @@ def build_permission_selector_block(
         }
 
 def build_grant_processing_modal(
-    message: str = "Granting access and applying rotation settings...",
+    message: str = "Granting access. This may take a few seconds...",
 ) -> Dict[str, Any]:
     return {
         "type": "modal",
