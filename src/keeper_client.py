@@ -28,7 +28,7 @@ from .models import (
 )
 from .config import KeeperConfig
 from .logger import logger
-from .utils import is_pam_record_type
+from .utils import is_pam_record_type, format_slack_local_time
 from .commander_errors import log_submit_warning, submit_error
 
 
@@ -430,7 +430,66 @@ class KeeperClient:
             import traceback
             traceback.print_exc()
         return None
-    
+
+    def is_pam_user_folder(
+        self, folder_uid: str
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Detect whether the folder is a rotate-on-expire eligible PAM user folder.
+        """
+        if not folder_uid:
+            return False, None
+
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": f"list-sf {folder_uid} --roe-eligible --format=json"},
+                timeout=10,
+            )
+
+            if response.status_code != 202:
+                log_submit_warning(response.status_code, "list-sf")
+                # Only surface 401/403 (admin-fixable allowlist / auth errors)
+                if response.status_code in (401, 403):
+                    return False, submit_error(response.status_code)
+                return False, None
+
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.warning("No request_id received for list-sf --roe-eligible")
+                return False, None
+
+            result_data = self._poll_for_result(request_id, max_wait=10)
+            if not result_data:
+                logger.warning(
+                    f"list-sf --roe-eligible timed out for folder {folder_uid}"
+                )
+                return False, None
+
+            if result_data.get('status') != 'success':
+                logger.debug(
+                    f"list-sf --roe-eligible non-success status for {folder_uid}: "
+                    f"{result_data.get('status')}"
+                )
+                return False, None
+
+            data = result_data.get('data')
+            if isinstance(data, list) and len(data) > 0:
+                logger.debug(
+                    f"Folder {folder_uid} is rotate-on-expire eligible "
+                    f"({len(data)} entry/entries returned)"
+                )
+                return True, None
+
+            return False, None
+
+        except Exception as e:
+            logger.error(
+                f"Exception in is_pam_user_folder for {folder_uid}: {e}",
+                exc_info=True,
+            )
+            return False, None
+
     def grant_record_access(
         self,
         record_uid: str,
@@ -443,6 +502,22 @@ class KeeperClient:
         Grant access to a record with time limit using share-record command.
         """
         try:
+            sync_ok, sync_error = self.sync_down()
+            if sync_error:
+                return {
+                    'success': False,
+                    'error_code': sync_error.get('error_code'),
+                    'error': sync_error.get(
+                        'error', 'Commander rejected sync-down'
+                    ),
+                }
+            if not sync_ok:
+                logger.warning(
+                    "sync-down before share-record did not complete cleanly; "
+                    "continuing against the current Commander cache for %s",
+                    record_uid,
+                )
+
             #Prevent granting access to record owner
             record_owner = self.get_record_owner(record_uid)
 
@@ -552,7 +627,8 @@ class KeeperClient:
                 expire_in = self._format_duration(duration_seconds)
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                # Render in each Slack viewer's local timezone instead of server time.
+                expires_at_str = format_slack_local_time(expires_at)
                 if rotate_on_expire:
                     cmd_parts.append("--rotate-on-expiration")
             else:
@@ -633,10 +709,22 @@ class KeeperClient:
 
                 error_lower = error_msg.lower()
 
-                if (
+                is_rotation_not_configured = (
                     "rotation must be already set" in error_lower
-                    or ("rotate" in error_lower and "expiration" in error_lower and "set on the record" in error_lower)
-                ):
+                    or (
+                        "rotate" in error_lower
+                        and "expiration" in error_lower
+                        and "set on the record" in error_lower
+                    )
+                    or (
+                        "--rotate-on-expiration" in error_lower
+                        and (
+                            "requires" in error_lower
+                            or "ineligible" in error_lower
+                        )
+                    )
+                )
+                if is_rotation_not_configured:
                     return {
                         'success': False,
                         'error_code': 'pam_rotation_not_configured',
@@ -710,12 +798,29 @@ class KeeperClient:
         folder_uid: str,
         user_email: str,
         permission: PermissionLevel,
-        duration_seconds: Optional[int] = 86400
+        duration_seconds: Optional[int] = 86400,
+        rotate_on_expire: bool = False,
     ) -> Dict[str, Any]:
         """
         Grant access to a folder with optional time limit using share-folder command.
         """
         try:
+            sync_ok, sync_error = self.sync_down()
+            if sync_error:
+                return {
+                    'success': False,
+                    'error_code': sync_error.get('error_code'),
+                    'error': sync_error.get(
+                        'error', 'Commander rejected sync-down'
+                    ),
+                }
+            if not sync_ok:
+                logger.warning(
+                    "sync-down before share-folder did not complete cleanly; "
+                    "continuing against the current Commander cache for %s",
+                    folder_uid,
+                )
+
             # Map permission level to share-folder flags
             permission_flags = []
             
@@ -741,7 +846,11 @@ class KeeperClient:
                 expire_in = self._format_duration(duration_seconds)
                 cmd_parts.extend(["--expire-in", expire_in])
                 expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                # Render in each Slack viewer's local timezone instead of server time.
+                expires_at_str = format_slack_local_time(expires_at)
+                # Rotate PAM credentials when the time-limited share expires.
+                if rotate_on_expire:
+                    cmd_parts.append("--rotate-on-expiration")
             else:
                 expires_at_str = "Never (Permanent)"
             
@@ -815,17 +924,39 @@ class KeeperClient:
                     }
             
             if result_data.get('status') == 'success':
+                pam_rotate_scheduled = bool(
+                    rotate_on_expire
+                    and duration_seconds is not None
+                )
                 return {
                     'success': True,
                     'expires_at': expires_at_str,
                     'permission': permission.value,
-                    'duration': 'temporary' if duration_seconds else 'permanent'
+                    'duration': 'temporary' if duration_seconds else 'permanent',
+                    'rotate_on_expire': pam_rotate_scheduled,
                 }
             else:
                 error_msg = result_data.get('message', result_data.get('error', 'Unknown error'))
                 if isinstance(error_msg, list):
                     error_msg = '\n'.join(error_msg)
-                
+
+                error_lower = error_msg.lower()
+
+                if (
+                    "rotation must be already set" in error_lower
+                    or ("rotate" in error_lower and "expiration" in error_lower and "set on the record" in error_lower)
+                ):
+                    return {
+                        'success': False,
+                        'error_code': 'pam_rotation_not_configured',
+                        'error': (
+                            "Rotation is not configured for this PAM User folder.\n\n"
+                            "Set up rotation (Gateway + rotation settings) on the records in this folder "
+                            "in the Keeper Vault first, or uncheck *Rotate credentials when access expires* "
+                            "and approve again."
+                        ),
+                    }
+
                 # Check for time-limited access conflict with manage permissions
                 # Also catch "User share...failed" errors which indicate permission conflicts
                 is_time_limited_conflict = "time-limited access" in error_msg.lower() and ("manage" in error_msg.lower() or "re-share" in error_msg.lower())
@@ -1083,7 +1214,8 @@ class KeeperClient:
                 # Calculate expiration time
                 if duration_seconds:
                     expires_at = datetime.now() + timedelta(seconds=duration_seconds)
-                    expires_at_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                    # Render in each Slack viewer's local timezone instead of server time.
+                    expires_at_str = format_slack_local_time(expires_at)
                 else:
                     expires_at_str = "Never (7 days default)"
                 

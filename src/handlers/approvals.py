@@ -44,6 +44,33 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     is_uid = action_data["is_uid"]
     request_type = action_data["type"]
     justification = action_data.get("justification", "No justification provided")
+
+    if approver_id == requester_id:
+        # body["channel"] is not always present in block-action payloads;
+        # fall back to the container channel so the ephemeral always has a
+        # valid channel_id. The return fires regardless so approval is blocked
+        # even if the ephemeral can't be delivered.
+        channel_id = (
+            (body.get("channel") or {}).get("id")
+            or (body.get("container") or {}).get("channel_id")
+        )
+        if channel_id:
+            try:
+                client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=approver_id,
+                    text=(
+                        ":no_entry_sign: You cannot approve your own request. "
+                        "Please ask your admin or another team member to "
+                        "review and approve it on your behalf."
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Could not send self-approval ephemeral to {approver_id}: {e}")
+        else:
+            logger.warning(f"Self-approval blocked for {approver_id} but no channel_id found to send ephemeral")
+        return
+
     
     if not is_uid:
         from ..utils import send_error_dm
@@ -98,7 +125,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             logger.info("Duration cleared by user, treating as permanent")
         elif not duration_value:
             # No state interaction yet, fall back to action_data default
-            duration_value = action_data.get("duration", "1h")
+            duration_value = action_data.get("duration", "5m")
             duration_seconds = parse_duration_to_seconds(duration_value)
             duration_text = format_duration(duration_value)
         else:
@@ -119,7 +146,11 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     user_email = get_user_email_from_slack(client, requester_id)
 
     rotate_on_expire = False
-    if request_type == "record" and duration_seconds and action_data.get("is_pam"):
+    if (
+        request_type in ("record", "folder")
+        and duration_seconds
+        and action_data.get("is_pam")
+    ):
         rotate_on_expire = extract_rotate_on_expire_from_approval(state, message_blocks)
     
     # Grant access or create share link via Keeper
@@ -138,7 +169,8 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 folder_uid=identifier,
                 user_email=user_email,
                 permission=permission,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
+                rotate_on_expire=rotate_on_expire,
             )
             item_title = identifier
         elif request_type == "one_time_share":
@@ -279,14 +311,19 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
             if error_code == 'pam_rotation_not_configured':
                 try:
                     original_blocks = body["message"]["blocks"]
+                    rotation_subject = (
+                        "PAM User record"
+                        if request_type == "record"
+                        else "PAM User folder"
+                    )
                     banner = {
                         "type": "context",
                         "block_id": "rotation_error_banner",
                         "elements": [{
                             "type": "mrkdwn",
                             "text": (
-                                ":warning: *Last attempt failed:* Rotation is not "
-                                "configured on this PAM User record. "
+                                f":warning: *Last attempt failed:* Rotation is not "
+                                f"configured on this {rotation_subject}. "
                                 "Uncheck *Rotate credentials when access expires* "
                                 "and click Approve again, or configure rotation "
                                 "in the Keeper Vault."
@@ -403,7 +440,7 @@ def handle_deny_action(body: Dict[str, Any], client, config, keeper_client):
     approval_id = action_data["approval_id"]
     requester_id = action_data["requester_id"]
     request_type = action_data["type"]
-    
+
     try:
         # Update approval message
         update_approval_message(

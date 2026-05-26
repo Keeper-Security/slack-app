@@ -15,7 +15,7 @@ COMMANDER_SUBMIT_FAILED = "commander_submit_failed"
 
 COMMAND_NOT_ALLOWED_MESSAGE = (
     "Commander rejected the command (HTTP 403).\n\n"
-    "This usually means the command is not registered in the Slack app "
+    "This usually means some newly added command is not registered in the Slack app "
     "Commander Service Mode allowlist. Please re-run `slack-app-setup` in "
     "Keeper Commander to generate a new YAML configuration, update the "
     "Commander Service Mode configuration for this app instance, and restart "

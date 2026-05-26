@@ -212,6 +212,16 @@ def format_timestamp(dt: Optional[datetime] = None) -> str:
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
+def format_slack_local_time(dt: datetime) -> str:
+    """
+    Format a datetime as a Slack ``<!date^…>`` token so each viewer sees the
+    value rendered in their own timezone and date/time preferences.
+    """
+    unix_ts = int(dt.timestamp())
+    fallback = dt.strftime('%Y-%m-%d %H:%M:%S')
+    return f"<!date^{unix_ts}^{{date_short_pretty}} at {{time}}|{fallback}>"
+
+
 def truncate_text(text: str, max_length: int = 100) -> str:
     """
     Truncate text to maximum length with ellipsis.
@@ -367,14 +377,18 @@ def parse_duration_to_seconds(duration_str: str) -> Optional[int]:
         return None
     
     mapping = {
-        '1h': 3600,          
-        '4h': 14400,          
-        '8h': 28800,          
-        '24h': 86400,         
-        '7d': 604800,        
-        '30d': 2592000       
+        '5m': 300,
+        '10m': 600,
+        '30m': 1800,
+        '1h': 3600,
+        '4h': 14400,
+        '8h': 28800,
+        '24h': 86400,
+        '7d': 604800,
+        '30d': 2592000,
+        '90d': 7776000,
     }
-    return mapping.get(duration_str, 3600)  # Default: 1 hour
+    return mapping.get(duration_str, 300)  # Default: 5 minutes
 
 
 def format_duration(duration_str: str) -> str:
@@ -382,51 +396,41 @@ def format_duration(duration_str: str) -> str:
     Format duration string for display.
     """
     mapping = {
+        '5m': '5 minutes',
+        '10m': '10 minutes',
+        '30m': '30 minutes',
         '1h': '1 hour',
         '4h': '4 hours',
         '8h': '8 hours',
         '24h': '24 hours',
         '7d': '7 days',
         '30d': '30 days',
-        'permanent': 'No Expiration'
+        '90d': '90 days',
+        'permanent': 'No Expiration',
     }
-    return mapping.get(duration_str, '1 hour')
+    return mapping.get(duration_str, '5 minutes')
 
 
-def get_duration_options() -> list:
+def get_duration_options(exclude_permanent: bool = False) -> list:
     """
     Get standard duration options for Slack dropdown.
+
     """
-    return [
-        {
-            "text": {"type": "plain_text", "text": "1 hour"},
-            "value": "1h"
-        },
-        {
-            "text": {"type": "plain_text", "text": "4 hours"},
-            "value": "4h"
-        },
-        {
-            "text": {"type": "plain_text", "text": "8 hours"},
-            "value": "8h"
-        },
-        {
-            "text": {"type": "plain_text", "text": "24 hours"},
-            "value": "24h"
-        },
-        {
-            "text": {"type": "plain_text", "text": "7 days"},
-            "value": "7d"
-        },
-        {
-            "text": {"type": "plain_text", "text": "30 days"},
-            "value": "30d"
-        },
-        {
-            "text": {"type": "plain_text", "text": "No Expiration"},
-            "value": "permanent"
-        }
+    options = [
+        {"text": {"type": "plain_text", "text": "5 minutes"},  "value": "5m"},
+        {"text": {"type": "plain_text", "text": "10 minutes"}, "value": "10m"},
+        {"text": {"type": "plain_text", "text": "30 minutes"}, "value": "30m"},
+        {"text": {"type": "plain_text", "text": "1 hour"},     "value": "1h"},
+        {"text": {"type": "plain_text", "text": "4 hours"},    "value": "4h"},
+        {"text": {"type": "plain_text", "text": "8 hours"},    "value": "8h"},
+        {"text": {"type": "plain_text", "text": "24 hours"},   "value": "24h"},
+        {"text": {"type": "plain_text", "text": "7 days"},     "value": "7d"},
+        {"text": {"type": "plain_text", "text": "30 days"},    "value": "30d"},
+        {"text": {"type": "plain_text", "text": "No Expiration"}, "value": "permanent"},
     ]
+    if exclude_permanent:
+        return [o for o in options if o["value"] != "permanent"]
+    return options
 
 
 def get_user_email_from_slack(client, user_id: str) -> str:

@@ -135,7 +135,7 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
             is_uid=is_uid,
             request_type=RequestType.ONE_TIME_SHARE,
             justification=justification,
-            duration="1h",  # Default minimum (approver can change)
+            duration="5m",  # Default minimum (approver can change)
             record_details=record_details
         )
         

@@ -82,6 +82,7 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
     
     # Fetch folder details if UID is provided
     folder_details = None
+    is_pam_user_folder = False
     if is_uid:
         logger.info(f"Fetching folder details for UID: {identifier}")
         folder_details = keeper_client.get_folder_by_uid(identifier)
@@ -105,6 +106,35 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
                 response_type="ephemeral"
             )
             return
+
+        # Detect PAM-user folder so the approval card can show the rotate-on-expire checkbox by default
+
+        try:
+            is_pam_user_folder, pam_folder_error = (
+                keeper_client.is_pam_user_folder(identifier)
+            )
+        except Exception as e:
+            logger.warning(
+                f"is_pam_user_folder detection failed for {identifier}: {e}"
+            )
+            is_pam_user_folder = False
+            pam_folder_error = None
+
+        if pam_folder_error:
+            from ..utils import notify_commander_unauthorized_or_forbidden
+            error_msg = notify_commander_unauthorized_or_forbidden(
+                client=client,
+                user_id=user_id,
+                error=pam_folder_error,
+                context_lines=[f"*Folder UID:* `{identifier}`"],
+            )
+            respond(
+                text=(
+                    f"*Folder request could not be submitted.*\n\n{error_msg}"
+                ),
+                response_type="ephemeral",
+            )
+            return
     
     # Generate unique approval ID
     approval_id = generate_approval_id()
@@ -121,8 +151,9 @@ def handle_request_folder(body: Dict[str, Any], client, respond, config, keeper_
             is_uid=is_uid,
             request_type=RequestType.FOLDER,
             justification=justification,
-            duration="1h",  # Default minimum (approver can change)
-            folder_details=folder_details
+            duration="5m",  # Default minimum (approver can change)
+            folder_details=folder_details,
+            is_pam_user_folder=is_pam_user_folder,
         )
         
 
