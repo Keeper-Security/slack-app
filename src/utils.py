@@ -18,6 +18,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from .logger import logger
+
 
 def _collapse_for_log(value: Any, default: str = "N/A") -> str:
     """Return a single-line representation for audit log fields."""
@@ -692,7 +694,7 @@ def handle_invitation_sent(
                 ]
             )
         except Exception as e:
-            print(f"[ERROR] Failed to update approval card for invitation: {e}")
+            logger.error(f"Failed to update approval card for invitation: {e}")
     
     # Notify requester
     try:
@@ -708,10 +710,10 @@ def handle_invitation_sent(
                  f"_Approved by <@{approver_id}>_"
         )
     except Exception as e:
-        print(f"[WARN] Could not send invitation DM to requester: {e}")
-    
-    print(
-        f"[INFO] Pending [approval_id={approval_id}]: Invitation sent for "
+        logger.warning(f"Could not send invitation DM to requester: {e}")
+
+    logger.info(
+        f"Pending [approval_id={approval_id}]: Invitation sent for "
         f"{request_type} (UID: {identifier}) to requester {requester_id}, "
         f"approver {approver_id}; waiting for Keeper invitation acceptance"
     )
