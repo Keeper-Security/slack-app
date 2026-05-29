@@ -23,6 +23,7 @@ from ..utils import (
     is_record_owner_error,
     is_permission_conflict_error,
     extract_rotate_on_expire_from_approval,
+    format_approval_audit_log,
 )
 from ..logger import logger
 
@@ -144,6 +145,7 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
     
     # Get user's real email from Slack
     user_email = get_user_email_from_slack(client, requester_id)
+    approver_email = get_user_email_from_slack(client, approver_id)
 
     rotate_on_expire = False
     if (
@@ -286,7 +288,15 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     expires_at=expires_at,
                     approval_id=approval_id
                 )
-                logger.info(f"Approval {approval_id}: Created one-time share for {requester_id} by {approver_id}")
+                logger.info(format_approval_audit_log(
+                    approval_id=approval_id,
+                    request_type=request_type,
+                    identifier=identifier,
+                    requester_email=user_email,
+                    approver_email=approver_email,
+                    permission=permission.value,
+                    duration_text=duration_text,
+                ))
             else:
                 # Send access granted DM
                 send_access_granted_dm(
@@ -301,7 +311,17 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     permission=permission.value,
                     server_domain=keeper_client.server_domain
                 )
-            logger.info(f"Approval {approval_id}: Granted {request_type} access to {requester_id} by {approver_id}")
+                logger.info(format_approval_audit_log(
+                    approval_id=approval_id,
+                    request_type=request_type,
+                    identifier=identifier,
+                    requester_email=user_email,
+                    approver_email=approver_email,
+                    permission=permission.value,
+                    duration_text=duration_text,
+                    rotate_on_expire=bool(result.get('rotate_on_expire')),
+                    is_pam=bool(action_data.get("is_pam")),
+                ))
         else:
             # Approval failed - check error type
             error_message = result.get('error', 'Unknown error')
@@ -354,8 +374,10 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                         text="Approval pending - rotation not configured",
                     )
                     logger.info(
-                        f"Approval {approval_id}: showed rotation-not-configured "
-                        "banner on UID card, approval state unchanged"
+                        f"Pending [approval_id={approval_id}]: Rotation not configured for "
+                        f"{request_type} (UID: {identifier}), requested by {user_email}, "
+                        f"approver {approver_email}, requested permission {permission.value}, "
+                        f"requested duration {duration_text}; approval state unchanged"
                     )
                 except Exception as banner_error:
                     logger.warning(
@@ -372,7 +394,11 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
 
             # Check if user is the record owner
             if is_record_owner_error(error_message):
-                logger.info(f"Approval {approval_id}: User is record owner, sending DM to approver")
+                logger.info(
+                    f"Blocked [approval_id={approval_id}]: requester is record owner for "
+                    f"{request_type} (UID: {identifier}), requester {user_email}, "
+                    f"approver {approver_email}"
+                )
                 from ..utils import send_error_dm
                 send_error_dm(
                     client=client,
@@ -392,7 +418,11 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                 )
             elif is_permission_conflict_error(error_message):
                 # Permission conflict - don't update card, send DM to approver
-                logger.info(f"Approval {approval_id}: Permission conflict detected, sending DM to approver")
+                logger.info(
+                    f"Blocked [approval_id={approval_id}]: permission conflict for "
+                    f"{request_type} (UID: {identifier}), requester {user_email}, "
+                    f"approver {approver_email}, requested permission {permission.value}"
+                )
                 from ..utils import send_error_dm
                 send_error_dm(
                     client=client,
@@ -413,7 +443,13 @@ def handle_approve_action(body: Dict[str, Any], client, config, keeper_client):
                     status=f"Approval failed: {error_message}",
                     original_blocks=body["message"]["blocks"]
                 )
-            logger.info(f"Approval {approval_id}: Failed for {requester_id} - {error_message}")
+            error_text = " ".join(str(error_message).split())
+            logger.info(
+                f"Failed [approval_id={approval_id}]: {request_type} access "
+                f"(UID: {identifier}), requester {user_email}, approver {approver_email}, "
+                f"requested permission {permission.value}, duration {duration_text}, "
+                f'error "{error_text}"'
+            )
     except Exception as e:
         logger.error(f"Error in approve handler: {e}")
         update_approval_message(
@@ -440,6 +476,12 @@ def handle_deny_action(body: Dict[str, Any], client, config, keeper_client):
     approval_id = action_data["approval_id"]
     requester_id = action_data["requester_id"]
     request_type = action_data["type"]
+    identifier = action_data.get("identifier", "N/A")
+    justification = " ".join(
+        str(action_data.get("justification", "No justification provided")).split()
+    )
+    requester_email = get_user_email_from_slack(client, requester_id)
+    approver_email = get_user_email_from_slack(client, approver_id)
 
     try:
         # Update approval message
@@ -460,7 +502,11 @@ def handle_deny_action(body: Dict[str, Any], client, config, keeper_client):
             approver_name=approver_name
         )
         
-        logger.info(f"Approval {approval_id}: Denied by {approver_id}")
+        logger.info(
+            f"Denied [approval_id={approval_id}]: {request_type} request "
+            f"(UID: {identifier}), requester {requester_email}, "
+            f'denied by {approver_email}, justification "{justification}"'
+        )
     except Exception as e:
         logger.error(f"Error in deny handler: {e}")
         update_approval_message(

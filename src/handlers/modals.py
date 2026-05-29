@@ -22,7 +22,8 @@ from ..utils import (
     parse_duration_to_seconds, format_duration, get_user_email_from_slack,
     generate_approval_id, is_valid_uid, sanitize_user_input,
     MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
-    is_record_owner_error, is_permission_conflict_error
+    is_record_owner_error, is_permission_conflict_error,
+    format_approval_audit_log
 )
 from ..logger import logger
 
@@ -372,8 +373,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     
     # Get user's real email from Slack
     user_email = get_user_email_from_slack(client, requester_id)
+    approver_email = get_user_email_from_slack(client, approver_id)
 
     rotate_on_expire = False
+    is_pam_target = False
     if (
         duration_seconds
         and not is_self_destruct
@@ -386,6 +389,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         if request_type == "record":
             record_for_rotate = keeper_client.get_record_by_uid(selected_uid)
             if record_for_rotate and is_pam_user_record_type(record_for_rotate.record_type):
+                is_pam_target = True
                 rotate_on_expire = extract_rotate_on_expire_from_modal(values)
         elif request_type == "folder":
             cached_is_pam_folder = approval_data.get("selected_folder_is_pam_user")
@@ -400,6 +404,7 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     )
                     cached_is_pam_folder = False
             if cached_is_pam_folder:
+                is_pam_target = True
                 rotate_on_expire = extract_rotate_on_expire_from_modal(values)
     
     try:
@@ -464,7 +469,15 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                     expires_at=result.get('expires_at'),
                     approval_id=approval_id
                 )
-                logger.info(f"Approval {approval_id}: Created one-time share via search modal by {approver_id}")
+                logger.info(format_approval_audit_log(
+                    approval_id=approval_id,
+                    request_type=request_type,
+                    identifier=selected_uid,
+                    requester_email=user_email,
+                    approver_email=approver_email,
+                    permission=permission.value,
+                    duration_text=duration_text,
+                ))
             else:
                 # Notify requester with access granted (works for both regular and self-destruct records)
                 # Build message with self-destruct note if applicable
@@ -486,8 +499,17 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 
                 from ..utils import send_dm
                 send_dm(client, requester_id, access_message)
-                logger.info(f"Approval {approval_id}: Granted via search modal by {approver_id}" + 
-                      (" (self-destruct)" if is_self_destruct else ""))
+                logger.info(format_approval_audit_log(
+                    approval_id=approval_id,
+                    request_type=request_type,
+                    identifier=selected_uid,
+                    requester_email=user_email,
+                    approver_email=approver_email,
+                    permission=permission.value,
+                    duration_text=duration_text,
+                    rotate_on_expire=bool(result.get('rotate_on_expire')),
+                    is_pam=is_pam_target,
+                ))
             
             # Update original approval card to show approved status
             message_ts = approval_data.get("message_ts")
@@ -648,8 +670,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                             view=retry_modal,
                         )
                         logger.info(
-                            f"Approval {approval_id}: updated open search modal with "
-                            "rotation-not-configured banner via views_update"
+                            f"Pending [approval_id={approval_id}]: Rotation not configured for "
+                            f"{request_type} (UID: {selected_uid}), requested by {user_email}, "
+                            f"approver {approver_email}, requested permission {permission.value}, "
+                            f"requested duration {duration_text}; modal updated with banner via views_update"
                         )
                     else:
                         client.views_open(
@@ -657,8 +681,10 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                             view=retry_modal,
                         )
                         logger.info(
-                            f"Approval {approval_id}: reopened search modal with "
-                            "rotation-not-configured banner"
+                            f"Pending [approval_id={approval_id}]: Rotation not configured for "
+                            f"{request_type} (UID: {selected_uid}), requested by {user_email}, "
+                            f"approver {approver_email}, requested permission {permission.value}, "
+                            f"requested duration {duration_text}; modal reopened with banner"
                         )
                 except Exception as modal_error:
                     logger.warning(

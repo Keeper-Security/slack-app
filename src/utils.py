@@ -18,6 +18,53 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from .logger import logger
+
+
+def _collapse_for_log(value: Any, default: str = "N/A") -> str:
+    """Return a single-line representation for audit log fields."""
+    if value is None:
+        return default
+    text = " ".join(str(value).split())
+    return text or default
+
+
+def format_approval_audit_log(
+    *,
+    approval_id: str,
+    request_type: str,
+    identifier: str,
+    requester_email: str,
+    approver_email: str,
+    permission: str,
+    duration_text: str,
+    rotate_on_expire: bool = False,
+    is_pam: bool = False,
+) -> str:
+    """Format Keeper approval audit details"""
+    request_type_text = _collapse_for_log(request_type).replace("_", " ")
+    action = (
+        "Created one-time share"
+        if request_type == "one_time_share"
+        else f"Granted {request_type_text} access"
+    )
+
+    permission_label = format_permission_name(_collapse_for_log(permission, ""))
+
+    details = [
+        f"Approval {_collapse_for_log(approval_id)}: {action}",
+        f"(UID: {_collapse_for_log(identifier)})",
+        f"for user {_collapse_for_log(requester_email)}",
+        f"approved by {_collapse_for_log(approver_email)}",
+        f"with {permission_label} permission",
+        f"for {_collapse_for_log(duration_text)}",
+    ]
+
+    if is_pam and rotate_on_expire:
+        details.append("auto-rotate enabled")
+
+    return ", ".join(details)
+
 
 def is_pam_record_type(record_type: str) -> bool:
     """True if the record type is a PAM record (pamUser, pamMachine, etc.)."""
@@ -647,7 +694,7 @@ def handle_invitation_sent(
                 ]
             )
         except Exception as e:
-            print(f"[ERROR] Failed to update approval card for invitation: {e}")
+            logger.error(f"Failed to update approval card for invitation: {e}")
     
     # Notify requester
     try:
@@ -663,6 +710,10 @@ def handle_invitation_sent(
                  f"_Approved by <@{approver_id}>_"
         )
     except Exception as e:
-        print(f"[WARN] Could not send invitation DM to requester: {e}")
-    
-    print(f"[INFO] Approval {approval_id}: Invitation sent for {request_type} to {requester_id} by {approver_id}")
+        logger.warning(f"Could not send invitation DM to requester: {e}")
+
+    logger.info(
+        f"Pending [approval_id={approval_id}]: Invitation sent for "
+        f"{request_type} (UID: {identifier}) to requester {requester_id}, "
+        f"approver {approver_id}; waiting for Keeper invitation acceptance"
+    )
