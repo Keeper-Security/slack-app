@@ -42,6 +42,20 @@ class PermissionLevel(Enum):
     MANAGE_ALL = "manage_all"
 
 
+class NSFPermissionRole(Enum):
+    """
+    Role-based permissions for Nested Share Folder (NSF) records and
+    folders.
+    """
+
+    VIEWER = "viewer"
+    SHARE_MANAGER = "share-manager"
+    CONTENT_MANAGER = "content-manager"
+    CONTENT_SHARE_MANAGER = "content-share-manager"
+    FULL_MANAGER = "full-manager"
+    TRANSFER_OWNER = "owner"
+
+
 class ShareType(Enum):
     """Type of share link."""
     ONE_TIME = "one_time"
@@ -65,6 +79,12 @@ class KeeperRecord:
     
     notes: Optional[str] = None
     """Record notes/description"""
+
+    is_nsf: bool = False
+    """
+    True if this record is a Nested Share Folder (NSF) record (lives
+    inside a nested share subfolder).
+    """
     
     @property
     def display_name(self) -> str:
@@ -87,6 +107,13 @@ class KeeperFolder:
     
     folder_type: str = "folder"
     """Type of folder (e.g., 'folder', 'shared_folder')"""
+
+    is_nsf: bool = False
+    """
+    True if this folder is a Nested Share Folder (NSF). Drives the
+    share flow toward ``nsf-share-folder`` and the role-based permission
+    selector instead of the Classic Share Folder permission flags.
+    """
     
     @property
     def display_name(self) -> str:

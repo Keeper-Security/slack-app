@@ -213,8 +213,12 @@ class KeeperSlackApp:
                 # Get selected permission
                 selected_permission = body["actions"][0]["selected_option"]["value"]
                 
-                # Determine if duration should be shown
-                PERMANENT_ONLY = ["can_share", "edit_and_share", "change_owner", "manage_users", "manage_all"]
+                # Determine if duration should be shown.
+                PERMANENT_ONLY = [
+                    "can_share", "edit_and_share", "change_owner",
+                    "manage_users", "manage_all",
+                    "owner",
+                ]
                 show_duration = selected_permission not in PERMANENT_ONLY
                 
                 # Check if this is a modal or a message
@@ -418,13 +422,19 @@ class KeeperSlackApp:
                 view = body["view"]
                 view_id = view["id"]
                 metadata = json.loads(view["private_metadata"])
-                
+
+                # Preserve the current vault-type toggle when rerendering
+                # (the self-destruct path is only meaningful in Classic mode,
+                # but the user can toggle either way).
+                use_classic = bool(metadata.get("use_classic", False))
+
                 # Rebuild modal with expiration field shown/hidden
                 from .views import build_create_record_modal
                 updated_modal = build_create_record_modal(
                     approval_data=metadata,
                     original_query="",
-                    show_expiration=is_checked  # Show dropdown only if checked
+                    show_expiration=is_checked,  # Show dropdown only if checked
+                    use_classic=use_classic,
                 )
                 
                 # Update the modal
@@ -435,6 +445,25 @@ class KeeperSlackApp:
 
             except Exception as e:
                 logger.error(f"Error handling self-destruct checkbox: {e}")
+                import traceback
+                traceback.print_exc()
+
+        @self.slack_app.action("classic_vault_checkbox")
+        def action_classic_vault_checkbox(ack, body, client):
+            """
+            Re-render the create-record modal when the operator toggles the
+            "Use Classic permission model" checkbox so the form can show or
+            hide the self-destruct controls (Classic-only) and the inline
+            Nested Share Folder hint.
+            """
+            ack()
+            try:
+                from .handlers.modals import handle_create_record_classic_vault_action
+                handle_create_record_classic_vault_action(
+                    body, client, self.config, self.keeper_client
+                )
+            except Exception as e:
+                logger.error(f"Error handling classic-vault checkbox: {e}")
                 import traceback
                 traceback.print_exc()
         

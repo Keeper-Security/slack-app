@@ -15,8 +15,14 @@ Slack UI builders using Block Kit.
 """
 
 import json
-from typing import List, Dict, Any, Optional
-from .models import RequestType, PermissionLevel, KeeperRecord, KeeperFolder
+from typing import List, Dict, Any, Optional, Tuple
+from .models import (
+    RequestType,
+    PermissionLevel,
+    NSFPermissionRole,
+    KeeperRecord,
+    KeeperFolder,
+)
 from .utils import (
     format_timestamp,
     format_permission_name,
@@ -31,6 +37,70 @@ from .logger import logger
 
 # Default Keeper server domain
 DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
+
+
+# ----------------------------------------------------------------------
+# Nested Share Folder (NSF) helpers
+# ----------------------------------------------------------------------
+
+_NSF_VALUE_SUFFIX = "|nsf"
+
+
+def encode_search_item_value(uid: str, is_nsf: bool) -> str:
+    """
+    Encode a search result's UID + NSF flag into a single Slack option
+    value string. Nested Share Folder results get a ``|nsf`` suffix; classic
+    results keep the raw UID.
+    """
+    if is_nsf:
+        return f"{uid}{_NSF_VALUE_SUFFIX}"
+    return uid
+
+
+def decode_search_item_value(value: str) -> Tuple[str, bool]:
+    """
+    Reverse :func:`encode_search_item_value`. Returns ``(uid, is_nsf)``.
+    Any value without the suffix is treated as classic.
+    """
+    if value.endswith(_NSF_VALUE_SUFFIX):
+        return value[: -len(_NSF_VALUE_SUFFIX)], True
+    return value, False
+
+
+def _item_is_nsf(item: Any) -> bool:
+    """
+    Return the ``is_nsf`` flag from a search result, regardless
+    of whether it's a fresh :class:`KeeperRecord` / :class:`KeeperFolder`
+    instance or a cached-results dict surviving across modal updates.
+    """
+    if isinstance(item, dict):
+        return bool(item.get('is_nsf', False))
+    return bool(getattr(item, 'is_nsf', False))
+
+
+def _item_uid(item: Any) -> str:
+    """Pull the UID out of either a model instance or a cached dict."""
+    if isinstance(item, dict):
+        return item.get('uid', '') or ''
+    return getattr(item, 'uid', '') or ''
+
+
+def _item_title(item: Any) -> str:
+    """
+    Pull a human-friendly title out of a record or folder. Records use
+    ``title``; folders use ``name``; cached dicts may use either.
+    """
+    if isinstance(item, dict):
+        return item.get('title') or item.get('name') or 'Untitled'
+    return getattr(item, 'title', None) or getattr(item, 'name', '') or 'Untitled'
+
+
+def _results_nsf_flags(results: List[Any]) -> List[bool]:
+    """
+    Convenience for capturing the NSF flag for an entire result page in
+    one pass (used when building Slack option lists).
+    """
+    return [_item_is_nsf(r) for r in results]
 
 
 def post_approval_request(
@@ -272,14 +342,89 @@ def build_pam_rotate_on_expire_block(
     }
 
 
+def _build_nsf_permission_options(
+    request_type: RequestType,
+) -> List[Dict[str, Any]]:
+    """
+    Build the option list for Nested Share Folder role-based permissions.
+    """
+    options = [
+        {
+            "text": {"type": "plain_text", "text": "Viewer (read-only)"},
+            "value": NSFPermissionRole.VIEWER.value,
+        },
+        {
+            "text": {"type": "plain_text", "text": "Share Manager"},
+            "value": NSFPermissionRole.SHARE_MANAGER.value,
+        },
+        {
+            "text": {"type": "plain_text", "text": "Content Manager"},
+            "value": NSFPermissionRole.CONTENT_MANAGER.value,
+        },
+        {
+            "text": {"type": "plain_text", "text": "Content & Share Manager"},
+            "value": NSFPermissionRole.CONTENT_SHARE_MANAGER.value,
+        },
+        {
+            "text": {"type": "plain_text", "text": "Full Manager"},
+            "value": NSFPermissionRole.FULL_MANAGER.value,
+        },
+    ]
+    if request_type != RequestType.FOLDER:
+        options.append({
+            "text": {"type": "plain_text", "text": "Transfer Ownership"},
+            "value": NSFPermissionRole.TRANSFER_OWNER.value,
+        })
+    return options
+
+
 def build_permission_selector_block(
     request_type: RequestType,
     for_modal: bool = False,
     initial_value: Optional[str] = None,
+    is_nsf: bool = False,
 ) -> Dict[str, Any]:
     """
     Build permission level selector block.
     """
+    if is_nsf and request_type != RequestType.ONE_TIME_SHARE:
+        options = _build_nsf_permission_options(request_type)
+        initial_option = options[0]
+        if initial_value:
+            for opt in options:
+                if opt.get("value") == initial_value:
+                    initial_option = opt
+                    break
+
+        if for_modal:
+            return {
+                "type": "input",
+                "block_id": "permission_selector",
+                "dispatch_action": True,
+                "label": {
+                    "type": "plain_text",
+                    "text": "Select Permission Level (Nested Share Folder)",
+                },
+                "element": {
+                    "type": "static_select",
+                    "action_id": "select_permission",
+                    "placeholder": {"type": "plain_text", "text": "Choose role"},
+                    "initial_option": initial_option,
+                    "options": options,
+                },
+            }
+        return {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Select Permission Level (Nested Share Folder):*"},
+            "accessory": {
+                "type": "static_select",
+                "action_id": "select_permission",
+                "placeholder": {"type": "plain_text", "text": "Choose role"},
+                "initial_option": initial_option,
+                "options": options,
+            },
+        }
+
     if request_type == RequestType.ONE_TIME_SHARE:
         # One-time shares only support View Only and Can Edit
         options = [
@@ -505,15 +650,14 @@ def build_search_modal(
     metadata['query'] = query
     
     # Cache results as serializable dicts (KeeperRecord/KeeperFolder objects can't be JSON serialized)
-    # Only cache essential fields and limit to 10 to stay under Slack's private_metadata 3000 char limit
     if results:
-        # Check if results are already dicts (from cached_results) or objects
         if isinstance(results[0], dict):
             metadata['cached_results'] = [
                 {
                     'uid': r.get('uid', ''),
                     'title': r.get('title', 'Untitled'),
                     'record_type': r.get('record_type', ''),
+                    'is_nsf': bool(r.get('is_nsf', False)),
                 }
                 for r in results[:10]
             ]
@@ -523,6 +667,7 @@ def build_search_modal(
                     'uid': r.uid,
                     'title': r.title if hasattr(r, 'title') else r.name,
                     'record_type': getattr(r, 'record_type', ''),
+                    'is_nsf': bool(getattr(r, 'is_nsf', False)),
                 }
                 for r in results[:10]
             ]
@@ -567,9 +712,13 @@ def build_search_modal(
         }
     ]
     
-    # Add "Create New Record" button beside Refine (only for description-based RECORD requests)
-    if (search_type == "record" and 
-        approval_data.get('request_type') not in ['one_time_share'] and
+    # Add "Create New Record" button beside Refine (only for description-based
+    # RECORD requests). Gate on the resolved request_type enum: the type lives
+    # under the 'type' key in approval_data, so the old 'request_type' key check
+    # never matched and the button wrongly showed for one-time-share requests.
+    # OTS shares an existing record's link, so creating a new record is N/A.
+    if (search_type == "record" and
+        request_type != RequestType.ONE_TIME_SHARE and
         not approval_data.get('is_uid', False)):
         action_buttons.append({
             "type": "button",
@@ -633,43 +782,62 @@ def build_search_modal(
         newly_created_uid = approval_data.get('newly_created_uid')
         selected_uid = approval_data.get('selected_uid')
         selected_record_is_pam_user = False
-        # Folder-side PAM detection is lazy I/O and lives in the item-selection
-        # handler; the result is cached in approval_data so the same key flows
-        # through to subsequent rerenders.
+
         selected_folder_is_pam_user = bool(
             search_type == "folder"
             and approval_data.get('selected_folder_is_pam_user', False)
         )
 
+
+        selected_uid_norm, _ = decode_search_item_value(selected_uid) if selected_uid else ('', False)
+
+
+        nsf_flags = _results_nsf_flags(results[:10])
+        is_mixed_results = len(set(nsf_flags)) > 1
+        is_one_time_share = request_type == RequestType.ONE_TIME_SHARE
+
+        selected_item_is_nsf = nsf_flags[0] if (nsf_flags and not is_mixed_results) else False
+
+        selection_resolved = False
+
         for item in results[:10]:  # Limit to 10 for UX
-            # Handle both objects (KeeperRecord/KeeperFolder) and dicts (cached results)
+            uid = _item_uid(item)
+            title = _item_title(item)
+            item_is_nsf = _item_is_nsf(item)
             if isinstance(item, dict):
-                # Cached result dict
-                text = f"{item.get('title', 'Untitled')} ({item.get('uid', '')})"
-                value = item.get('uid', '')
                 item_record_type = item.get('record_type', '')
             elif isinstance(item, KeeperRecord):
-                text = f"{item.title} ({item.uid})"
-                value = item.uid
                 item_record_type = getattr(item, 'record_type', '')
             else:  # KeeperFolder
-                text = f"{item.name} ({item.uid})"
-                value = item.uid
                 item_record_type = ''
-            
+
+            # OTS searches already exclude NSF records, so the Classic/NSF
+            # badge adds noise there. Keep it for normal share flows where
+            # mixed Classic + NSF results are possible.
+            if is_one_time_share:
+                text = f"{title} ({uid})"
+            else:
+                badge = "[NSF]" if item_is_nsf else "[Classic]"
+                text = f"{badge} {title} ({uid})"
+            value = encode_search_item_value(uid, item_is_nsf)
+
             option = {
                 "text": {"type": "plain_text", "text": text},
                 "value": value
             }
             options.append(option)
-            
-            # Pre-select if this is the newly created record or the user just clicked it
-            if selected_uid and value == selected_uid:
+
+            # Pre-select if this is the newly created record or the user just clicked it.
+            if selected_uid_norm and uid == selected_uid_norm:
                 initial_option = option
+                selected_item_is_nsf = item_is_nsf
+                selection_resolved = True
                 if is_pam_user_record_type(item_record_type):
                     selected_record_is_pam_user = True
-            elif not selected_uid and newly_created_uid and value == newly_created_uid:
+            elif not selected_uid_norm and newly_created_uid and uid == newly_created_uid:
                 initial_option = option
+                selected_item_is_nsf = item_is_nsf
+                selection_resolved = True
 
         # Single combined flag drives duration filtering + rotate checkbox.
         selected_target_is_pam = bool(
@@ -710,19 +878,67 @@ def build_search_modal(
             logger.info(f"No pre-selection - newly_created_uid: {newly_created_uid}")
         
         blocks.append(radio_block)
-        
-        # Only show permission and duration selectors if NOT creating self-destruct link
-        if not approval_data.get('create_self_destruct', False):
+
+
+        if is_mixed_results and not selection_resolved:
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": (
+                        "_Results include both *Classic* and *Nested Share "
+                        "Folder* items. Pick one above to load the matching "
+                        "permission options._"
+                    ),
+                }],
+            })
+
+
+        show_permission_controls = (not is_mixed_results) or selection_resolved
+        if approval_data.get('create_self_destruct', False):
+            # Self-destruct mode - show info message instead of selectors
+            duration_text = approval_data.get('self_destruct_duration', 'N/A')
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Self-Destruct Record Settings*\n\nRecord will be shared directly to requester's vault\nAuto-deletes after: *{duration_text}*\nAccess: View-Only"
+                }
+            })
+        elif show_permission_controls:
             selected_permission = approval_data.get('selected_permission')
             selected_duration = approval_data.get('selected_duration')
             rotate_initial_checked = approval_data.get('rotate_initial_checked', True)
 
-            # Add permission selector (full-width for modal)
+
+            # OTS has its own View Only / Can Edit model and NSF records are
+            # filtered out before rendering, so don't show Classic/NSF mode
+            # context there.
+            if not is_one_time_share:
+                if selected_item_is_nsf:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": ":file_folder: *Nested Share Folder* — role-based permissions",
+                        }],
+                    })
+                else:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": ":key: *Classic Share Folder* — standard share permissions",
+                        }],
+                    })
+
+
             blocks.append(
                 build_permission_selector_block(
                     request_type,
                     for_modal=True,
                     initial_value=selected_permission,
+                    is_nsf=selected_item_is_nsf,
                 )
             )
             
@@ -795,17 +1011,10 @@ def build_search_modal(
                         "text": "ℹ️ *Permanent Access:* The selected permission does not support time limits."
                     }]
                 })
-        else:
-            # Self-destruct mode - show info message instead
-            duration_text = approval_data.get('self_destruct_duration', 'N/A')
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Self-Destruct Record Settings*\n\nRecord will be shared directly to requester's vault\nAuto-deletes after: *{duration_text}*\nAccess: View-Only"
-                }
-            })
-        
+        # else: mixed-flavour results with no selection yet -- the radio
+        # button's ``dispatch_action`` will re-render this modal and the
+        # permission controls will appear at that point.
+
         if len(results) > 10:
             blocks.append({
                 "type": "context",
@@ -865,12 +1074,35 @@ def build_search_modal(
     
     return modal_config
 
-def build_create_record_modal(approval_data: Dict[str, Any], original_query: str = "", show_expiration: bool = False) -> Dict[str, Any]:
+def build_create_record_modal(
+    approval_data: Dict[str, Any],
+    original_query: str = "",
+    show_expiration: bool = False,
+    use_classic: bool = False,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Build modal for creating a new record.
     After creation, will return to search modal with new record pre-selected.
+
+    ``error`` renders a banner at the top (e.g. a Commander password-policy
+    rejection) so the user can correct the input and resubmit in place.
     """
-    blocks = [
+    is_nsf = not use_classic
+
+    blocks: List[Dict[str, Any]] = []
+
+    if error:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f":x: *Could not create record*\n```{error}```",
+            },
+        })
+        blocks.append({"type": "divider"})
+
+    blocks.extend([
             {
                 "type": "section",
                 "text": {
@@ -888,6 +1120,37 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 ]
             },
             {"type": "divider"},
+    ])
+
+
+    classic_option = {
+        "text": {"type": "plain_text", "text": "Use Classic permission model"},
+        "value": "classic",
+    }
+    vault_checkbox = {
+        "type": "checkboxes",
+        "action_id": "classic_vault_checkbox",
+        "options": [classic_option],
+    }
+    if use_classic:
+        vault_checkbox["initial_options"] = [classic_option]
+    blocks.append({
+        "type": "section",
+        "block_id": "classic_vault",
+        "text": {"type": "mrkdwn", "text": "*Vault Type* _(optional)_"},
+        "accessory": vault_checkbox,
+    })
+    if is_nsf:
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_Unchecked = Nested Share Folder record (role-based sharing). Self-destruct is Classic-only._",
+            }],
+        })
+    blocks.append({"type": "divider"})
+
+    blocks.extend([
             {
                 "type": "input",
                 "block_id": "record_type",
@@ -980,38 +1243,39 @@ def build_create_record_modal(approval_data: Dict[str, Any], original_query: str
                 "optional": True
             },
             {"type": "divider"}
-    ]
-    
-    checkbox_block = {
-        "type": "actions",
-        "block_id": "self_destructive_actions",
-        "elements": [
-            {
-                "type": "checkboxes",
-                "action_id": "self_destructive_checkbox",
-                "options": [
-                    {
-                        "text": {"type": "plain_text", "text": "Enable self-destruct (optional)"},
-                        "value": "enabled"
-                    }
-                ]
-            }
-        ]
-    }
-    
-    # Pre-check the checkbox if expiration dropdown should be shown
-    if show_expiration:
-        checkbox_block["elements"][0]["initial_options"] = [
-            {
-                "text": {"type": "plain_text", "text": "Enable self-destruct (optional)"},
-                "value": "enabled"
-            }
-        ]
-    
-    blocks.append(checkbox_block)
+    ])
+
+    if not is_nsf:
+        checkbox_block = {
+            "type": "actions",
+            "block_id": "self_destructive_actions",
+            "elements": [
+                {
+                    "type": "checkboxes",
+                    "action_id": "self_destructive_checkbox",
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "Enable self-destruct (optional)"},
+                            "value": "enabled"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # Pre-check the checkbox if expiration dropdown should be shown
+        if show_expiration:
+            checkbox_block["elements"][0]["initial_options"] = [
+                {
+                    "text": {"type": "plain_text", "text": "Enable self-destruct (optional)"},
+                    "value": "enabled"
+                }
+            ]
+
+        blocks.append(checkbox_block)
     
     # Conditionally add expiration dropdown only if checkbox is checked
-    if show_expiration:
+    if (not is_nsf) and show_expiration:
         blocks.append({
             "type": "input",
             "block_id": "link_expiration",
@@ -1524,7 +1788,10 @@ def build_create_secret_folder_select_modal(
         if uid:
             folder_options.append({
                 "text": {"type": "plain_text", "text": name[:75]},
-                "value": uid
+                # Encode the NSF flag onto the option value (same |nsf suffix
+                # scheme as the search modal) so the downstream handler can
+                # route to nsf-record-add vs record-add without re-querying.
+                "value": encode_search_item_value(uid, folder.get('is_nsf', False))
             })
     
     metadata = json.dumps({"user_id": user_id})
@@ -1566,7 +1833,8 @@ def build_create_secret_record_form_modal(
     folder_name: str,
     folder_uid: str,
     user_id: str,
-    subfolders: Optional[List[Dict[str, Any]]] = None
+    subfolders: Optional[List[Dict[str, Any]]] = None,
+    parent_is_nsf: bool = False,
 ) -> Dict[str, Any]:
     """
     Build modal for entering record details (Step 2 of create secret flow).
@@ -1575,7 +1843,8 @@ def build_create_secret_record_form_modal(
     metadata = json.dumps({
         "user_id": user_id,
         "folder_uid": folder_uid,
-        "folder_name": folder_name
+        "folder_name": folder_name,
+        "parent_is_nsf": parent_is_nsf,
     })
     
     blocks = [
@@ -1602,7 +1871,7 @@ def build_create_secret_record_form_modal(
         subfolder_options = [
             {
                 "text": {"type": "plain_text", "text": "(Parent folder)"},
-                "value": folder_uid
+                "value": encode_search_item_value(folder_uid, parent_is_nsf)
             }
         ]
         for sf in subfolders[:99]:
@@ -1611,7 +1880,10 @@ def build_create_secret_record_form_modal(
             if uid:
                 subfolder_options.append({
                     "text": {"type": "plain_text", "text": path[:75]},
-                    "value": uid
+                    # Encode each subfolder's own NSF flag so the submit
+                    # handler can route per-target (a Classic parent can hold
+                    # NSF subfolders and vice versa).
+                    "value": encode_search_item_value(uid, sf.get('is_nsf', False))
                 })
         
         blocks.append({

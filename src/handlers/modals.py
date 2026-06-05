@@ -100,17 +100,31 @@ def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_cl
             return
 
         selected_option = body.get("actions", [{}])[0].get("selected_option") or {}
-        selected_uid = selected_option.get("value")
+        raw_value = selected_option.get("value")
+        if not raw_value:
+            return
+
+        from ..views import decode_search_item_value, build_search_modal
+
+        selected_uid, selected_is_nsf = decode_search_item_value(raw_value)
         if not selected_uid:
             return
 
-        previous_selected_uid = metadata.get("selected_uid")
+        previous_uid = metadata.get("selected_uid")
+        previous_was_nsf = bool(metadata.get("selected_item_is_nsf", False))
+
+        if selected_is_nsf != previous_was_nsf:
+            metadata.pop("selected_permission", None)
+
         metadata["selected_uid"] = selected_uid
+        metadata["selected_item_is_nsf"] = selected_is_nsf
 
         search_type = metadata.get("search_type", "record")
         pam_folder_error: Optional[Dict[str, Any]] = None
-        if search_type == "folder":
-            if selected_uid != previous_selected_uid:
+        if search_type == "folder" and not selected_is_nsf:
+            # NSF folders never need the PAM rotate-on-expire probe; skip the
+            # list-sf call entirely for them.
+            if selected_uid != previous_uid:
                 try:
                     is_pam_folder, pam_folder_error = (
                         keeper_client.is_pam_user_folder(selected_uid)
@@ -123,8 +137,8 @@ def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_cl
                     )
                     metadata["selected_folder_is_pam_user"] = False
                     pam_folder_error = None
-
-        from ..views import build_search_modal
+        elif selected_is_nsf:
+            metadata["selected_folder_is_pam_user"] = False
 
         pam_folder_banner = _maybe_commander_search_error_banner(
             client=client,
@@ -144,9 +158,60 @@ def handle_item_selection_action(body: Dict[str, Any], client, config, keeper_cl
         )
 
         client.views_update(view_id=view_id, view=updated_modal)
-        logger.debug(f"item_selection: refreshed modal for selected_uid={selected_uid}")
+        logger.debug(
+            f"item_selection: refreshed modal for selected_uid={selected_uid} "
+            f"is_nsf={selected_is_nsf}"
+        )
     except Exception as exc:
         logger.error(f"item_selection handler error: {exc}")
+
+
+def handle_create_record_classic_vault_action(
+    body: Dict[str, Any], client, config, keeper_client
+) -> None:
+    try:
+        view = body.get("view") or {}
+        view_id = view.get("id")
+        if not view_id:
+            return
+
+        metadata_raw = view.get("private_metadata", "{}")
+        try:
+            approval_data = json.loads(metadata_raw)
+        except json.JSONDecodeError:
+            logger.warning("classic_vault: could not parse private_metadata")
+            return
+
+        action = body.get("actions", [{}])[0]
+        selected_options = action.get("selected_options", []) or []
+        use_classic = any(opt.get("value") == "classic" for opt in selected_options)
+
+        approval_data["use_classic"] = use_classic
+
+        from ..views import build_create_record_modal
+
+        updated_modal = build_create_record_modal(
+            approval_data=approval_data,
+            original_query=approval_data.get("query", ""),
+            show_expiration=False,
+            use_classic=use_classic,
+        )
+        client.views_update(view_id=view_id, view=updated_modal)
+        logger.debug(f"classic_vault toggle: use_classic={use_classic}")
+    except Exception as exc:
+        logger.error(f"classic_vault handler error: {exc}")
+
+
+def _is_classic_vault_checked(state_values: Dict[str, Any]) -> bool:
+    try:
+        selected = (
+            state_values.get("classic_vault", {})
+            .get("classic_vault_checkbox", {})
+            .get("selected_options", [])
+        )
+        return any(opt.get("value") == "classic" for opt in selected)
+    except Exception:
+        return False
 
 
 def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper_client):
@@ -216,23 +281,33 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         approval_data.pop("selected_uid", None)
         approval_data.pop("selected_folder_is_pam_user", None)
         
-        # Run search
+        # Run search. ``for_one_time_share`` filters out PAM + NSF records
+        # for OTS requests (Commander's ``one-time-share`` supports neither).
         request_type = approval_data.get("type", "record")
-        exclude_pam = request_type == "one_time_share"
+        for_one_time_share = request_type == "one_time_share"
         if search_type == "record":
-            results = keeper_client.search_records(
-                new_query, limit=20, exclude_pam=exclude_pam
+            results, search_error = keeper_client.search_records(
+                new_query, limit=20, for_one_time_share=for_one_time_share
             )
         else:
-            results = keeper_client.search_folders(new_query, limit=20)
-        
+            results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+        search_banner = _maybe_commander_search_error_banner(
+            client=client,
+            user_id=body.get("user", {}).get("id", ""),
+            search_error=search_error,
+            query=new_query,
+            search_type=search_type,
+        )
+
         # Rebuild and update modal with results using API call
         from ..views import build_search_modal
         updated_modal = build_search_modal(
             query=new_query,
             search_type=search_type,
             results=results,
-            approval_data=approval_data
+            approval_data=approval_data,
+            error_banner=search_banner or None,
         )
         
         logger.debug(f"Updating modal with {len(results)} results")
@@ -294,21 +369,37 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     else:
         ack()
 
-    selected_uid = selected_item["value"]
+
+    from ..views import decode_search_item_value
+    from ..models import NSFPermissionRole
+    raw_selected_value = selected_item["value"]
+    selected_uid, selected_is_nsf = decode_search_item_value(raw_selected_value)
     
     # Get record title from the selected item or metadata
     record_title = selected_item.get("text", {}).get("text", "").split(" (")[0] if selected_item else f"Record {selected_uid}"
+    # Strip the [NSF] / [Classic] badge we prepend in build_search_modal so
+    # downstream messaging shows just the human title.
+    for badge in ("[NSF] ", "[Classic] "):
+        if record_title.startswith(badge):
+            record_title = record_title[len(badge):]
+            break
     if not record_title or record_title.startswith("Record "):
         record_title = approval_data.get('newly_created_title', approval_data.get('record_title', f"Record {selected_uid}"))
     
     # Check if this is a self-destruct record
     is_self_destruct = approval_data.get('create_self_destruct', False)
+
+    permission = None
+    permission_label = None
+    nsf_role: Optional[NSFPermissionRole] = None
     
     # Extract permission and duration
     if is_self_destruct:
-        # Self-destruct records: use duration from creation, always view-only
+        # Self-destruct records: use duration from creation, always view-only.
+        # (Self-destruct is Classic-only, so NSF path can't reach here.)
         logger.info("Self-destruct record detected - sharing with view-only access")
         permission = PermissionLevel.VIEW_ONLY
+        permission_label = PermissionLevel.VIEW_ONLY.value
         self_destruct_duration_str = approval_data.get('self_destruct_duration', '5m')
         duration_seconds = parse_duration_to_seconds(self_destruct_duration_str)
         duration_value = self_destruct_duration_str
@@ -318,49 +409,79 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         # Normal records: use admin-selected permission and duration
         permission_block = values.get("permission_selector", {}).get("select_permission", {})
         permission_value = permission_block.get("selected_option", {}).get("value", "view_only")
-        permission = PermissionLevel(permission_value)
-        
-        # For one-time shares, convert permission to editable flag
+
+        # For one-time shares, convert permission to editable flag (only
+        # makes sense on the Classic path; NSF doesn't do one-time shares).
         editable = (permission_value == PermissionLevel.CAN_EDIT.value)
-        
-        # Some permissions are always permanent (no duration)
-        PERMANENT_ONLY_PERMISSIONS = [
-            # Record permissions (permanent)
-            PermissionLevel.CAN_SHARE.value,
-            PermissionLevel.EDIT_AND_SHARE.value,
-            PermissionLevel.CHANGE_OWNER.value,
-            # Folder permissions (permanent)
-            PermissionLevel.MANAGE_USERS.value,
-            PermissionLevel.MANAGE_ALL.value
-        ]
-        
-        if permission_value in PERMANENT_ONLY_PERMISSIONS:
-            # Force permanent access for these permissions
-            duration_seconds = None
-            duration_value = "permanent"
-            duration_text = "No Expiration"
-            logger.info(f"{permission_value} is permanent-only, ignoring duration selector")
-        else:
-            # Normal duration handling for View Only and Can Edit
-            duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
-            # Handle the case where selected_option is null (when field is cleared)
-            selected_option = duration_block.get("selected_option") or {}
-            duration_value = selected_option.get("value")
-            
-            # Check if duration was cleared/not selected or set to permanent
-            if duration_value == "permanent":
-                # User explicitly selected "No Expiration"
-                duration_seconds = None
-                duration_text = "No Expiration"
-            elif not duration_value:
-                # User cleared or didn't select duration (optional field) - treat as permanent
+
+        if selected_is_nsf:
+            try:
+                nsf_role = NSFPermissionRole(permission_value)
+            except ValueError:
+                # Fall back to safest role if the form somehow submitted an
+                # unexpected value (e.g. stale modal pre-NSF selection).
+                nsf_role = NSFPermissionRole.VIEWER
+            permission_label = nsf_role.value
+            permission = nsf_role
+
+            # Transfer-ownership is always permanent.
+            if nsf_role == NSFPermissionRole.TRANSFER_OWNER:
                 duration_seconds = None
                 duration_value = "permanent"
                 duration_text = "No Expiration"
             else:
-                # Normal duration value selected
-                duration_seconds = parse_duration_to_seconds(duration_value)
-                duration_text = format_duration(duration_value)
+                duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
+                selected_option = duration_block.get("selected_option") or {}
+                duration_value = selected_option.get("value")
+                if duration_value == "permanent" or not duration_value:
+                    duration_seconds = None
+                    duration_value = "permanent"
+                    duration_text = "No Expiration"
+                else:
+                    duration_seconds = parse_duration_to_seconds(duration_value)
+                    duration_text = format_duration(duration_value)
+        else:
+            permission = PermissionLevel(permission_value)
+            permission_label = permission.value
+
+            # Some permissions are always permanent (no duration)
+            PERMANENT_ONLY_PERMISSIONS = [
+                # Record permissions (permanent)
+                PermissionLevel.CAN_SHARE.value,
+                PermissionLevel.EDIT_AND_SHARE.value,
+                PermissionLevel.CHANGE_OWNER.value,
+                # Folder permissions (permanent)
+                PermissionLevel.MANAGE_USERS.value,
+                PermissionLevel.MANAGE_ALL.value
+            ]
+
+            if permission_value in PERMANENT_ONLY_PERMISSIONS:
+                # Force permanent access for these permissions
+                duration_seconds = None
+                duration_value = "permanent"
+                duration_text = "No Expiration"
+                logger.info(f"{permission_value} is permanent-only, ignoring duration selector")
+            else:
+                # Normal duration handling for View Only and Can Edit
+                duration_block = values.get("grant_duration", {}).get("grant_duration_select", {})
+                # Handle the case where selected_option is null (when field is cleared)
+                selected_option = duration_block.get("selected_option") or {}
+                duration_value = selected_option.get("value")
+
+                # Check if duration was cleared/not selected or set to permanent
+                if duration_value == "permanent":
+                    # User explicitly selected "No Expiration"
+                    duration_seconds = None
+                    duration_text = "No Expiration"
+                elif not duration_value:
+                    # User cleared or didn't select duration (optional field) - treat as permanent
+                    duration_seconds = None
+                    duration_value = "permanent"
+                    duration_text = "No Expiration"
+                else:
+                    # Normal duration value selected
+                    duration_seconds = parse_duration_to_seconds(duration_value)
+                    duration_text = format_duration(duration_value)
     
     # Get approver info
     approver_id = body["user"]["id"]
@@ -377,9 +498,12 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
 
     rotate_on_expire = False
     is_pam_target = False
+    # NSF items can never be PAM (they live in Nested Share Folder, not PAM rotation
+    # configs), so the entire rotate-on-expire probe is skipped for them.
     if (
         duration_seconds
         and not is_self_destruct
+        and not selected_is_nsf
         and values.get("pam_rotate_block")
     ):
         from ..utils import (
@@ -408,7 +532,21 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
                 rotate_on_expire = extract_rotate_on_expire_from_modal(values)
     
     try:
-        if request_type == "record":
+        if selected_is_nsf and request_type == "record":
+            result = keeper_client.grant_nsf_record_access(
+                record_uid=selected_uid,
+                user_email=user_email,
+                role=nsf_role,
+                duration_seconds=duration_seconds,
+            )
+        elif selected_is_nsf and request_type == "folder":
+            result = keeper_client.grant_nsf_folder_access(
+                folder_uid=selected_uid,
+                user_email=user_email,
+                role=nsf_role,
+                duration_seconds=duration_seconds,
+            )
+        elif request_type == "record":
             result = keeper_client.grant_record_access(
                 record_uid=selected_uid,
                 user_email=user_email,
@@ -831,7 +969,8 @@ def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_clie
     ).strip()
     search_type = approval_data.get("search_type", "record")
     request_type = approval_data.get("type", "record")
-    exclude_pam = request_type == "one_time_share"
+    # OTS-only filter: drops PAM + NSF records that one-time-share can't operate on.
+    for_one_time_share = request_type == "one_time_share"
     user_id = body["user"]["id"]
 
     from ..views import build_search_modal
@@ -922,11 +1061,19 @@ def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_clie
         return
 
     if search_type == "record":
-        results = keeper_client.search_records(
-            new_query, limit=20, exclude_pam=exclude_pam
+        results, search_error = keeper_client.search_records(
+            new_query, limit=20, for_one_time_share=for_one_time_share
         )
     else:
-        results = keeper_client.search_folders(new_query, limit=20)
+        results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+    sync_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=body.get("user", {}).get("id", ""),
+        search_error=search_error,
+        query=new_query,
+        search_type=search_type,
+    )
 
     try:
         client.views_update(
@@ -936,6 +1083,7 @@ def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_clie
                 search_type=search_type,
                 results=results,
                 approval_data=approval_data,
+                error_banner=sync_banner or None,
             ),
         )
         logger.debug(
@@ -966,15 +1114,24 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     approval_data.pop("selected_uid", None)
     approval_data.pop("selected_folder_is_pam_user", None)
     
-    # Re-run search
+    # Re-run search. ``for_one_time_share`` filters PAM + NSF rows out for
+    # OTS requests (Commander's ``one-time-share`` supports neither).
     request_type = approval_data.get("type", "record")
-    exclude_pam = request_type == "one_time_share"
+    for_one_time_share = request_type == "one_time_share"
     if search_type == "record":
-        results = keeper_client.search_records(
-            new_query, limit=20, exclude_pam=exclude_pam
+        results, search_error = keeper_client.search_records(
+            new_query, limit=20, for_one_time_share=for_one_time_share
         )
     else:
-        results = keeper_client.search_folders(new_query, limit=20)
+        results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+    refine_banner = _maybe_commander_search_error_banner(
+        client=client,
+        user_id=body.get("user", {}).get("id", ""),
+        search_error=search_error,
+        query=new_query,
+        search_type=search_type,
+    )
     
     # Build updated modal
     from ..views import build_search_modal
@@ -982,7 +1139,8 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
         query=new_query,
         search_type=search_type,
         results=results,
-        approval_data=approval_data
+        approval_data=approval_data,
+        error_banner=refine_banner or None,
     )
     
     logger.debug(f"Updating modal with {len(results)} results")
@@ -1069,24 +1227,24 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
     
     auto_gen_selected = values.get("auto_gen_password", {}).get("auto_gen_checkbox", {}).get("selected_options", [])
     auto_gen_checked = any(opt.get("value") == "auto_gen" for opt in auto_gen_selected)
+
+    # Vault-type toggle. ``use_classic=False`` -> create as a Nested Share Folder
+    # record via ``nsf-record-add``; the self-destruct controls are not
+    # rendered in that mode so we skip the related extraction entirely.
+    use_classic = _is_classic_vault_checked(values)
     
-    # Extract self-destruct checkbox and expiration
+    # Extract self-destruct checkbox and expiration (Classic only).
     self_destruct_enabled = False
     self_destruct_duration = None
-    
-    # Check if checkbox is checked (from actions block)
-    checkbox_options = values.get("self_destructive_actions", {}).get("self_destructive_checkbox", {}).get("selected_options", [])
-    if checkbox_options and len(checkbox_options) > 0:
-        self_destruct_enabled = True
-        
-        # Get expiration duration (from input block)
-        expiration_value = values.get("link_expiration", {}).get("expiration_select", {}).get("selected_option", {}).get("value")
-        if expiration_value:
-            self_destruct_duration = expiration_value  # e.g., "1h", "24h", "7d", etc.
-        
-        # Mark in metadata that self-destruct is being used
-        metadata['create_self_destruct'] = True
-        metadata['self_destruct_duration'] = self_destruct_duration
+    if use_classic:
+        checkbox_options = values.get("self_destructive_actions", {}).get("self_destructive_checkbox", {}).get("selected_options", [])
+        if checkbox_options and len(checkbox_options) > 0:
+            self_destruct_enabled = True
+            expiration_value = values.get("link_expiration", {}).get("expiration_select", {}).get("selected_option", {}).get("value")
+            if expiration_value:
+                self_destruct_duration = expiration_value  # e.g., "1h", "24h", "7d", etc.
+            metadata['create_self_destruct'] = True
+            metadata['self_destruct_duration'] = self_destruct_duration
     
     if not title:
         return {
@@ -1105,30 +1263,53 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
         }
     
     try:
-        logger.info(f"Creating record '{title}' for requester {requester_id}" + (f" with self-destruct" if self_destruct_enabled else ""))
-        generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
-        
-        create_result = keeper_client.create_record(
-            title=title,
-            login=login or None,
-            password=None if generate_password else (password or None),
-            url=url or None,
-            notes=notes or None,
-            generate_password=generate_password,
-            self_destruct_duration=self_destruct_duration if self_destruct_enabled else None
+        vault_label = "Classic" if use_classic else "Nested Share Folder"
+        logger.info(
+            f"Creating {vault_label} record '{title}' for requester {requester_id}"
+            + (f" with self-destruct" if self_destruct_enabled else "")
         )
+        generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
+
+        if use_classic:
+            create_result = keeper_client.create_record(
+                title=title,
+                login=login or None,
+                password=None if generate_password else (password or None),
+                url=url or None,
+                notes=notes or None,
+                generate_password=generate_password,
+                self_destruct_duration=self_destruct_duration if self_destruct_enabled else None,
+            )
+        else:
+            create_result = keeper_client.create_nsf_record(
+                title=title,
+                login=login or None,
+                password=None if generate_password else (password or None),
+                url=url or None,
+                notes=notes or None,
+                generate_password=generate_password,
+            )
         
         if not create_result.get('success'):
-            # Show error in modal
             error_msg = create_result.get('error', 'Unknown error')
-            # Send DM with error since we can't easily show it in modal after ack
-            from ..utils import send_error_dm
-            user_id = body["user"]["id"]
-            send_error_dm(
-                client, user_id,
-                "Failed to create record",
-                error_msg
-            )
+            # Re-render the create-record modal with the Commander error.
+            if view_id:
+                from ..views import build_create_record_modal
+                error_modal = build_create_record_modal(
+                    approval_data=metadata,
+                    original_query=title,
+                    use_classic=use_classic,
+                    error=error_msg,
+                )
+                try:
+                    client.views_update(view_id=view_id, view=error_modal)
+                except Exception as e:
+                    logger.error(f"Failed to render create-record error in modal: {e}")
+                    from ..utils import send_error_dm
+                    send_error_dm(client, body["user"]["id"], "Failed to create record", error_msg)
+            else:
+                from ..utils import send_error_dm
+                send_error_dm(client, body["user"]["id"], "Failed to create record", error_msg)
             return
         
         record_uid = create_result.get('record_uid')
@@ -1148,9 +1329,10 @@ def handle_create_record_submit(body: Dict[str, Any], client, config, keeper_cli
         from ..models import KeeperRecord
         newly_created_record = KeeperRecord(
             uid=record_uid,
-                title=title,
+            title=title,
             record_type='login',
-            notes=notes or None
+            notes=notes or None,
+            is_nsf=not use_classic,
         )
         
         # Show only the newly created record (no unnecessary search)
