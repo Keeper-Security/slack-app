@@ -188,12 +188,21 @@ def handle_create_record_classic_vault_action(
 
         approval_data["use_classic"] = use_classic
 
+        # Preserve the self-destruct selection across the rebuild.
+        state_values = view.get("state", {}).get("values", {})
+        sd_selected = (
+            state_values.get("self_destructive_actions", {})
+            .get("self_destructive_checkbox", {})
+            .get("selected_options", [])
+        )
+        show_expiration = use_classic and bool(sd_selected)
+
         from ..views import build_create_record_modal
 
         updated_modal = build_create_record_modal(
             approval_data=approval_data,
             original_query=approval_data.get("query", ""),
-            show_expiration=False,
+            show_expiration=show_expiration,
             use_classic=use_classic,
         )
         client.views_update(view_id=view_id, view=updated_modal)
@@ -344,7 +353,35 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             ]
         })
         return
-    
+
+    # Validate the NSF permission BEFORE acking.
+    from ..views import decode_search_item_value as _decode_selected_value
+    from ..models import NSFPermissionRole as _NSFRoleForValidation
+    _pre_selected_uid, _pre_selected_is_nsf = _decode_selected_value(
+        selected_item["value"]
+    )
+    if _pre_selected_is_nsf and not approval_data.get("create_self_destruct", False):
+        _pre_permission_value = (
+            values.get("permission_selector", {})
+            .get("select_permission", {})
+            .get("selected_option", {})
+            .get("value", "")
+        )
+        try:
+            _NSFRoleForValidation(_pre_permission_value)
+        except ValueError:
+            logger.warning(
+                f"Rejected NSF grant: invalid permission value "
+                f"{_pre_permission_value!r} for uid={_pre_selected_uid}"
+            )
+            ack(response_action="errors", errors={
+                "permission_selector": (
+                    "Please re-select a Nested Share Folder permission "
+                    "before approving."
+                )
+            })
+            return
+
     # Item selected - acknowledge IMMEDIATELY (Slack requires ack within 3 seconds).
     pre_ack_request_type = approval_data.get("type", "record")
     pre_ack_is_self_destruct = approval_data.get("create_self_destruct", False)
@@ -418,8 +455,11 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
             try:
                 nsf_role = NSFPermissionRole(permission_value)
             except ValueError:
-                # Fall back to safest role if the form somehow submitted an
-                # unexpected value (e.g. stale modal pre-NSF selection).
+                # Defensive backstop only: invalid NSF permission values are
+                # rejected with an inline modal error before the ack (see the
+                # pre-ack validation above), so this branch should be
+                # unreachable in normal flow. Kept to avoid an unhandled
+                # exception after the deferred ack if state ever slips through.
                 nsf_role = NSFPermissionRole.VIEWER
             permission_label = nsf_role.value
             permission = nsf_role

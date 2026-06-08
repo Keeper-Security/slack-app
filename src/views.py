@@ -43,6 +43,8 @@ DEFAULT_KEEPER_DOMAIN = "keepersecurity.com"
 # Nested Share Folder (NSF) helpers
 # ----------------------------------------------------------------------
 
+# Slack option values are a single string, so we pack the NSF flag onto the
+# UID as a suffix instead of a separate field.
 _NSF_VALUE_SUFFIX = "|nsf"
 
 
@@ -62,6 +64,8 @@ def decode_search_item_value(value: str) -> Tuple[str, bool]:
     Reverse :func:`encode_search_item_value`. Returns ``(uid, is_nsf)``.
     Any value without the suffix is treated as classic.
     """
+    if not value:
+        return "", False
     if value.endswith(_NSF_VALUE_SUFFIX):
         return value[: -len(_NSF_VALUE_SUFFIX)], True
     return value, False
