@@ -30,10 +30,15 @@ def handle_create_secret_folder_select(ack, body: Dict[str, Any], client, config
         ack()
         return
     
-    folder_uid = selected["value"]
+    from ..views import decode_search_item_value
+    # The option value carries the parent folder's NSF flag (|nsf suffix).
+    folder_uid, parent_is_nsf = decode_search_item_value(selected["value"])
     folder_name = selected["text"]["text"]
     
-    logger.info(f"User {user_id} selected shared folder: {folder_name} ({folder_uid})")
+    logger.info(
+        f"User {user_id} selected shared folder: {folder_name} "
+        f"({folder_uid}, is_nsf={parent_is_nsf})"
+    )
     
     # Keep the modal open with a loading state (ack must happen within 3s)
     ack(response_action="update", view={
@@ -58,7 +63,8 @@ def handle_create_secret_folder_select(ack, body: Dict[str, Any], client, config
             folder_name=folder_name,
             folder_uid=folder_uid,
             user_id=user_id,
-            subfolders=subfolders if subfolders else None
+            subfolders=subfolders if subfolders else None,
+            parent_is_nsf=parent_is_nsf,
         )
         
         client.views_update(
@@ -80,6 +86,7 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
     user_id = metadata["user_id"]
     folder_uid = metadata["folder_uid"]
     folder_name = metadata["folder_name"]
+    parent_is_nsf = metadata.get("parent_is_nsf", False)
     
     title = (values.get("secret_title", {}).get("title_input", {}).get("value") or "").strip()
     login = (values.get("secret_login", {}).get("login_input", {}).get("value") or "").strip()
@@ -90,13 +97,19 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
     auto_gen_selected = values.get("auto_gen_password", {}).get("auto_gen_checkbox", {}).get("selected_options", [])
     auto_gen_checked = any(opt.get("value") == "auto_gen" for opt in auto_gen_selected)
     
-    # Check for subfolder selection (text contains full path from tree command)
+    # Check for subfolder selection (text contains full path from tree command).
+    # Option values are NSF-encoded; decode before comparing/using the UID.
+    from ..views import decode_search_item_value
     subfolder_selected = values.get("subfolder_select", {}).get("subfolder_choice", {}).get("selected_option")
     target_folder_uid = folder_uid
+    target_is_nsf = parent_is_nsf
     subfolder_path = None
-    if subfolder_selected and subfolder_selected["value"] != folder_uid:
-        target_folder_uid = subfolder_selected["value"]
-        subfolder_path = subfolder_selected["text"]["text"]
+    if subfolder_selected:
+        sel_uid, sel_is_nsf = decode_search_item_value(subfolder_selected["value"])
+        if sel_uid != folder_uid:
+            target_folder_uid = sel_uid
+            target_is_nsf = sel_is_nsf
+            subfolder_path = subfolder_selected["text"]["text"]
     
     if not title:
         ack(response_action="errors", errors={"secret_title": "Title is required"})
@@ -131,12 +144,23 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
     
     view_id = body["view"]["id"]
     
-    logger.info(f"User {user_id} creating record '{title}' in folder {target_folder_uid}")
+    logger.info(
+        f"User {user_id} creating record '{title}' in folder {target_folder_uid} "
+        f"(is_nsf={target_is_nsf})"
+    )
     
     try:
         generate_password = auto_gen_checked or (password.upper() == '$GEN' if password else False)
         
-        result = keeper_client.create_record(
+        # Route based on the TARGET folder's type: NSF folders/subfolders use
+        # nsf-record-add (create_nsf_record); Classic ones use record-add
+        # (create_record). Both methods share the same kwargs.
+        create_fn = (
+            keeper_client.create_nsf_record
+            if target_is_nsf
+            else keeper_client.create_record
+        )
+        result = create_fn(
             title=title,
             login=login or None,
             password=None if generate_password else (password or None),

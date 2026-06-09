@@ -24,11 +24,12 @@ from datetime import datetime, timedelta
 from .models import (
     KeeperRecord,
     KeeperFolder,
-    PermissionLevel
+    PermissionLevel,
+    NSFPermissionRole,
 )
 from .config import KeeperConfig
 from .logger import logger
-from .utils import is_pam_record_type, format_slack_local_time
+from .utils import is_pam_record_type, format_slack_local_time, parse_duration_to_seconds
 from .commander_errors import log_submit_warning, submit_error
 
 
@@ -146,96 +147,90 @@ class KeeperClient:
         self,
         query: str,
         limit: int = 20,
-        exclude_pam: bool = False,
-    ) -> List[KeeperRecord]:
+        for_one_time_share: bool = False,
+    ) -> Tuple[List[KeeperRecord], Optional[Dict[str, Any]]]:
         """
         Search for records using Service Mode search command with category filter.
         """
         try:
-            # Sanitize query to prevent command injection
             safe_query = self._sanitize_search_query(query)
             if not safe_query:
                 logger.debug("Empty query after sanitization")
-                return []
-            
+                return [], None
+
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
                 json={"command": f'search -c r "{safe_query}" --format=json'},
                 timeout=10
             )
-            
+
             if response.status_code != 202:
-                logger.debug(f"Failed to submit search command: {response.status_code}")
-                return []
-            
-            result = response.json()
-            request_id = result.get('request_id')
-            
+                log_submit_warning(response.status_code, "search -c r")
+                if response.status_code in (401, 403):
+                    return [], submit_error(response.status_code)
+                return [], None
+
+            request_id = response.json().get('request_id')
             if not request_id:
                 logger.debug("No request_id received")
-                return []
-            
-            # Poll for result
+                return [], None
+
             result_data = self._poll_for_result(request_id, max_wait=30)
-            
-            if result_data:
-                return self._parse_search_records_results(
-                    result_data, limit, exclude_pam=exclude_pam
-                )
-            else:
+            if not result_data:
                 logger.debug("Search command timed out or failed")
-                return []
-                
+                return [], None
+
+            return self._parse_search_records_results(
+                result_data, limit, for_one_time_share=for_one_time_share
+            ), None
+
         except Exception as e:
             logger.debug(f"Error searching records: {e}")
             import traceback
             traceback.print_exc()
-        return []
+        return [], None
     
-    def search_folders(self, query: str, limit: int = 20) -> List[KeeperFolder]:
+    def search_folders(
+        self, query: str, limit: int = 20
+    ) -> Tuple[List[KeeperFolder], Optional[Dict[str, Any]]]:
         """
         Search for shared folders using Service Mode search command with category filter.
         """
         try:
-            # Sanitize query to prevent command injection
             safe_query = self._sanitize_search_query(query)
             if not safe_query:
                 logger.debug("Empty query after sanitization")
-                return []
-            
-            # Use search command with shared folder category filter (-c s)
+                return [], None
+
             response = self.session.post(
                 f'{self.base_url}/executecommand-async',
-                json={"command": f'search -c s "{safe_query}" --format=json'},
+                json={"command": f'search -c s,d "{safe_query}" --format=json'},
                 timeout=10
             )
-            
+
             if response.status_code != 202:
-                logger.debug(f"Failed to submit search command: {response.status_code}")
-                return []
-            
-            result = response.json()
-            request_id = result.get('request_id')
-            
+                log_submit_warning(response.status_code, "search -c s")
+                if response.status_code in (401, 403):
+                    return [], submit_error(response.status_code)
+                return [], None
+
+            request_id = response.json().get('request_id')
             if not request_id:
                 logger.debug("No request_id received")
-                return []
-            
-            # Poll for result with smart backoff
+                return [], None
+
             result_data = self._poll_for_result(request_id, max_wait=10)
-            
-            if result_data:
-                # Parse results (no client-side filtering needed - search does it)
-                return self._parse_search_folders_results(result_data, limit)
-            else:
+            if not result_data:
                 logger.debug("Search command timed out or failed")
-                return []
-                
+                return [], None
+
+            return self._parse_search_folders_results(result_data, limit), None
+
         except Exception as e:
             logger.debug(f"Error searching folders: {e}")
             import traceback
             traceback.print_exc()
-        return []
+        return [], None
     
     def get_record_by_uid(self, record_uid: str) -> Optional[KeeperRecord]:
         """
@@ -981,6 +976,376 @@ class KeeperClient:
                 'error': f"Error granting folder access: {str(e)}"
             }
 
+    # ------------------------------------------------------------------
+    # Nested Share Folder (NSF) helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _record_is_nsf(details: str) -> bool:
+        """
+        Return ``True`` if the ``details`` string from a record search
+        result indicates a Nested Share Folder record.
+        """
+        if not details:
+            return False
+        for part in details.split(', '):
+            if part.startswith('Record Category: '):
+                category = part.split(': ', 1)[1].strip().lower()
+                return category in ('keeperdrive', 'nested')
+        return False
+
+    @staticmethod
+    def _folder_is_nsf(folder_type: str) -> bool:
+        """
+        Return ``True`` if a folder search result row is a Nested Share
+        Folder.
+        """
+        if not folder_type:
+            return False
+        return folder_type.strip().lower() == 'nested_share_folder'
+
+    @staticmethod
+    def _nsf_invitation_pending(result_data: Dict[str, Any]) -> bool:
+        """
+        Detect Commander's "invitation has been sent"
+        """
+        message = result_data.get('message', [])
+        if isinstance(message, list):
+            joined = ' '.join(str(m) for m in message).lower()
+        else:
+            joined = str(message).lower()
+        error_field = result_data.get('error', '')
+        combined = f"{joined} {str(error_field).lower()}"
+        return (
+            'invitation has been sent' in combined
+            or 'repeat this command when invitation is accepted' in combined
+        )
+
+    @staticmethod
+    def _nsf_error_message(result_data: Dict[str, Any]) -> str:
+        """Flatten a Commander error payload into a single string."""
+        error_msg = result_data.get('message', result_data.get('error', 'Unknown error'))
+        if isinstance(error_msg, list):
+            error_msg = '\n'.join(str(m) for m in error_msg)
+        return KeeperClient._sanitize_commander_error(error_msg)
+
+    @staticmethod
+    def _sanitize_commander_error(error_msg: Any) -> str:
+        """
+        Strip CLI-only guidance from a Commander error before showing.
+        """
+        if isinstance(error_msg, list):
+            error_msg = '\n'.join(str(m) for m in error_msg)
+        text = str(error_msg)
+        cleaned_lines = [
+            line for line in text.splitlines()
+            if '--force' not in line.lower()
+        ]
+        return '\n'.join(cleaned_lines).strip() or text.strip()
+
+    def _submit_and_poll(
+        self, command: str, max_wait: int = 10
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Submit a Commander command and poll for the result.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": command},
+                timeout=10,
+            )
+        except Exception as e:
+            return None, {'success': False, 'error': f"Network error: {e}"}
+
+        if response.status_code != 202:
+            log_submit_warning(response.status_code, command.split(' ', 1)[0])
+            return None, submit_error(response.status_code)
+
+        request_id = response.json().get('request_id')
+        if not request_id:
+            return None, {'success': False, 'error': "No request_id received from API"}
+
+        result_data = self._poll_for_result(request_id, max_wait=max_wait)
+        if not result_data:
+            return None, {'success': False, 'error': "Command timed out or failed"}
+
+        return result_data, None
+
+    def grant_nsf_record_access(
+        self,
+        record_uid: str,
+        user_email: str,
+        role: NSFPermissionRole,
+        duration_seconds: Optional[int] = 86400,
+    ) -> Dict[str, Any]:
+        """
+        Share a Nested Share Folder record with a user via
+        ``nsf-share-record``.
+        """
+        try:
+            sync_ok, sync_error = self.sync_down()
+            if sync_error:
+                return {
+                    'success': False,
+                    'error_code': sync_error.get('error_code'),
+                    'error': sync_error.get(
+                        'error', 'Commander rejected sync-down'
+                    ),
+                }
+            if not sync_ok:
+                logger.warning(
+                    "sync-down before nsf-share-record did not complete cleanly; "
+                    "continuing against the current Commander cache for %s",
+                    record_uid,
+                )
+
+            if role == NSFPermissionRole.TRANSFER_OWNER:
+                ownership_cmd = (
+                    f"nsf-share-record {record_uid} -e {user_email} -a owner -f"
+                )
+                result_data, submit_err = self._submit_and_poll(
+                    ownership_cmd, max_wait=10
+                )
+                if submit_err:
+                    return submit_err
+
+                if result_data.get('status') == 'success':
+                    return {
+                        'success': True,
+                        'expires_at': 'N/A (Ownership Transfer)',
+                        'permission': role.value,
+                        'duration': 'permanent',
+                    }
+                return {
+                    'success': False,
+                    'error': (
+                        f"Failed to transfer ownership: "
+                        f"{self._nsf_error_message(result_data)}"
+                    ),
+                }
+
+            revoke_cmd = f"nsf-share-record {record_uid} -e {user_email} -a revoke -f"
+            try:
+                self._submit_and_poll(revoke_cmd, max_wait=5)
+            except Exception as e:
+                logger.debug(f"NSF record revoke skipped or failed: {e}")
+
+            cmd_parts = [
+                "nsf-share-record", record_uid,
+                "-e", user_email,
+                "-a", "grant",
+                "-r", role.value,
+            ]
+            if duration_seconds is not None:
+                cmd_parts.extend(["--expire-in", self._format_duration(duration_seconds)])
+                expires_at = datetime.now() + timedelta(seconds=duration_seconds)
+                expires_at_str = format_slack_local_time(expires_at)
+                duration_label = 'temporary'
+            else:
+                expires_at_str = "Never (Permanent)"
+                duration_label = 'permanent'
+
+            cmd_parts.append("-f")
+            result_data, submit_err = self._submit_and_poll(" ".join(cmd_parts), max_wait=10)
+            if submit_err:
+                return submit_err
+
+            if self._nsf_invitation_pending(result_data):
+                return {
+                    'success': True,
+                    'invitation_sent': True,
+                    'expires_at': 'Pending Invitation',
+                    'permission': role.value,
+                    'duration': 'permanent',
+                    'message': (
+                        'Share invitation sent. User must accept the invitation and '
+                        'create a Keeper account before they can access this record.'
+                    ),
+                }
+
+            if result_data.get('status') == 'success':
+                return {
+                    'success': True,
+                    'expires_at': expires_at_str,
+                    'permission': role.value,
+                    'duration': duration_label,
+                }
+
+            return {
+                'success': False,
+                'error': f"Failed to grant access: {self._nsf_error_message(result_data)}",
+            }
+        except Exception as e:
+            return {'success': False, 'error': f"Error granting Nested Share Folder record access: {e}"}
+
+    def grant_nsf_folder_access(
+        self,
+        folder_uid: str,
+        user_email: str,
+        role: NSFPermissionRole,
+        duration_seconds: Optional[int] = 86400,
+    ) -> Dict[str, Any]:
+        """
+        Share a Nested Share Folder with a user via ``nsf-share-folder``.
+        """
+        try:
+            sync_ok, sync_error = self.sync_down()
+            if sync_error:
+                return {
+                    'success': False,
+                    'error_code': sync_error.get('error_code'),
+                    'error': sync_error.get(
+                        'error', 'Commander rejected sync-down'
+                    ),
+                }
+            if not sync_ok:
+                logger.warning(
+                    "sync-down before nsf-share-folder did not complete cleanly; "
+                    "continuing against the current Commander cache for %s",
+                    folder_uid,
+                )
+
+            cmd_parts = [
+                "nsf-share-folder", folder_uid,
+                "-e", user_email,
+                "-a", "grant",
+                "-r", role.value,
+            ]
+            if duration_seconds is not None:
+                cmd_parts.extend(["--expire-in", self._format_duration(duration_seconds)])
+                expires_at = datetime.now() + timedelta(seconds=duration_seconds)
+                expires_at_str = format_slack_local_time(expires_at)
+                duration_label = 'temporary'
+            else:
+                expires_at_str = "Never (Permanent)"
+                duration_label = 'permanent'
+
+            result_data, submit_err = self._submit_and_poll(" ".join(cmd_parts), max_wait=10)
+            if submit_err:
+                return submit_err
+
+            if self._nsf_invitation_pending(result_data):
+                return {
+                    'success': True,
+                    'invitation_sent': True,
+                    'expires_at': 'Pending Invitation',
+                    'permission': role.value,
+                    'duration': 'permanent',
+                    'message': (
+                        'Share invitation sent. User must accept the invitation and '
+                        'create a Keeper account before they can access this folder.'
+                    ),
+                }
+
+            if result_data.get('status') == 'success':
+                return {
+                    'success': True,
+                    'expires_at': expires_at_str,
+                    'permission': role.value,
+                    'duration': duration_label,
+                }
+
+            return {
+                'success': False,
+                'error': f"Failed to grant access: {self._nsf_error_message(result_data)}",
+            }
+        except Exception as e:
+            return {'success': False, 'error': f"Error granting Nested Share Folder access: {e}"}
+
+    def create_nsf_record(
+        self,
+        title: str,
+        login: Optional[str] = None,
+        password: Optional[str] = None,
+        url: Optional[str] = None,
+        notes: Optional[str] = None,
+        generate_password: bool = False,
+        folder_uid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a record inside a Nested Share Folder using
+        ``nsf-record-add``.
+        """
+        try:
+            command_parts = [
+                "nsf-record-add",
+                f"--title {shlex.quote(title)}",
+                "--record-type login",
+            ]
+            if folder_uid:
+                command_parts.append(f"--folder {shlex.quote(folder_uid)}")
+            if notes:
+                notes_for_cli = notes.replace('\n', '\\n')
+                command_parts.append(f'--notes {shlex.quote(notes_for_cli)}')
+            if login:
+                command_parts.append(f'login={shlex.quote(login)}')
+            if password:
+                command_parts.append(f'password={shlex.quote(password)}')
+            elif generate_password:
+                command_parts.append('password=$GEN')
+            if url:
+                command_parts.append(f'url={shlex.quote(url)}')
+            command_parts.append("-f")
+
+            result_data, submit_err = self._submit_and_poll(
+                " ".join(command_parts), max_wait=30
+            )
+            if submit_err:
+                return submit_err
+
+            if result_data.get('status') != 'success':
+                return {
+                    'success': False,
+                    'error': f"Failed to create record: {self._nsf_error_message(result_data)}",
+                }
+
+            record_uid = self._extract_uid_from_create_response(result_data, title)
+            if record_uid:
+                return {
+                    'success': True,
+                    'record_uid': record_uid,
+                    'title': title,
+                    'is_nsf': True,
+                    'password': (password if password else ('$GEN' if generate_password else None)),
+                }
+            logger.warning("nsf-record-add reported success but UID could not be parsed")
+            return {
+                'success': True,
+                'record_uid': 'Unknown',
+                'title': title,
+                'is_nsf': True,
+                'note': 'Record created but UID could not be retrieved.',
+            }
+        except Exception as e:
+            logger.error(f"Exception in create_nsf_record: {e}", exc_info=True)
+            return {'success': False, 'error': f"Error creating Nested Share Folder record: {e}"}
+
+    @staticmethod
+    def _extract_uid_from_create_response(
+        result_data: Dict[str, Any], title: str
+    ) -> Optional[str]:
+        uid = result_data.get('uid') or result_data.get('record_uid')
+        if uid:
+            return uid
+
+        data = result_data.get('data')
+        if isinstance(data, dict):
+            uid = data.get('uid') or data.get('record_uid')
+            if uid:
+                return uid
+        elif isinstance(data, str) and len(data.strip()) == 22:
+            return data.strip()
+
+        message = result_data.get('message', '')
+        if isinstance(message, list):
+            message = '\n'.join(str(m) for m in message)
+        match = re.search(r'[A-Za-z0-9_-]{22}', str(message))
+        if match:
+            return match.group(0)
+
+        return None
+
     def _poll_for_result(self, request_id: str, max_wait: int = 15) -> Optional[Dict[str, Any]]:
         """
         Poll for async command result till got the result.
@@ -1054,17 +1419,19 @@ class KeeperClient:
         self,
         result_data: Dict,
         limit: int,
-        exclude_pam: bool = False,
+        for_one_time_share: bool = False,
     ) -> List[KeeperRecord]:
         """
-        Parse search command results for records.
+        Parse search command results for records, including Nested
+        Share Folder detection so downstream UI can pick the right
+        share flow.
+
         """
         records = []
         
         try:
-            # Check if data is directly in result_data or needs extraction
             data = result_data.get('data', [])
-            
+
             if not isinstance(data, list):
                 logger.debug(f"Unexpected data format: {type(data)}")
                 return records
@@ -1075,13 +1442,13 @@ class KeeperClient:
                 if not isinstance(item, dict):
                     continue
                 
-                # Extract fields from search response
                 uid = item.get('uid', '')
-                title = item.get('name', '')  # 'name' field contains the title
-                record_type = 'login'  # Default type
+                title = item.get('name', '')
+                record_type = 'login'
                 notes = ''
                 
-                # Parse details string: "Type: login, Description: bishal@gmail.com"
+                # `details` example coming from Commander:
+                # "Type: login, Description: test@gmail.com, Record Category: Nested"
                 details = item.get('details', '')
                 if details:
                     parts = details.split(', ')
@@ -1090,17 +1457,30 @@ class KeeperClient:
                             record_type = part.replace('Type: ', '').strip()
                         elif part.startswith('Description: '):
                             notes = part.replace('Description: ', '').strip()
-                
-                if exclude_pam and is_pam_record_type(record_type):
-                    logger.debug(f"Skipping record {uid} with PAM type: {record_type}")
-                    continue
-                
+
+                record_is_nsf = self._record_is_nsf(details)
+
+                if for_one_time_share:
+                    if is_pam_record_type(record_type):
+                        logger.debug(
+                            f"Skipping record {uid}: PAM type {record_type!r} "
+                            f"is not supported by one-time-share"
+                        )
+                        continue
+                    if record_is_nsf:
+                        logger.debug(
+                            f"Skipping record {uid}: Nested Share Folder "
+                            f"records are not supported by one-time-share"
+                        )
+                        continue
+
                 if uid and title:
                     records.append(KeeperRecord(
                         uid=uid,
                         title=title,
                         record_type=record_type,
-                        notes=notes
+                        notes=notes,
+                        is_nsf=record_is_nsf,
                     ))
                     
                     if len(records) >= limit:
@@ -1116,14 +1496,15 @@ class KeeperClient:
     
     def _parse_search_folders_results(self, result_data: Dict, limit: int) -> List[KeeperFolder]:
         """
-        Parse search command results for shared folders.
+        Parse search command results for shared folders, including
+        Nested Share Folder detection so the UI can route to the NSF
+        share flow.
         """
         folders = []
         
         try:
-            # Check if data is directly in result_data or needs extraction
             data = result_data.get('data', [])
-            
+
             if not isinstance(data, list):
                 logger.debug(f"Unexpected data format: {type(data)}")
                 return folders
@@ -1134,16 +1515,16 @@ class KeeperClient:
                 if not isinstance(item, dict):
                     continue
                 
-                # Extract fields from search response
                 uid = item.get('uid', '')
                 name = item.get('name', '')
                 folder_type = item.get('type', 'shared_folder')
-                
+
                 if uid and name:
                     folders.append(KeeperFolder(
                         uid=uid,
                         name=name,
-                        folder_type=folder_type
+                        folder_type=folder_type,
+                        is_nsf=self._folder_is_nsf(folder_type),
                     ))
                     
                     if len(folders) >= limit:
@@ -1318,9 +1699,15 @@ class KeeperClient:
                 notes_for_cli = notes.replace('\n', '\\n')
                 command_parts.append(f'--notes {shlex.quote(notes_for_cli)}')
             
-            # Self-destruct (space-separated, no quotes on duration)
+            # Self-destruct (space-separated, no quotes on duration).
             if self_destruct_duration:
-                command_parts.append(f'--self-destruct {self_destruct_duration}')
+                sd_seconds = parse_duration_to_seconds(self_destruct_duration)
+                sd_value = (
+                    self._format_duration(sd_seconds)
+                    if sd_seconds is not None
+                    else self_destruct_duration
+                )
+                command_parts.append(f'--self-destruct {sd_value}')
 
             if login:
                 command_parts.append(f'login={shlex.quote(login)}')
@@ -1439,9 +1826,9 @@ class KeeperClient:
                     'note': 'Record created but UID could not be retrieved.'
                 }
             else:
-                error_msg = result_data.get('message', 'Unknown error')
-                if isinstance(error_msg, list):
-                    error_msg = '\n'.join(error_msg)
+                # Commander surfaces policy/validation failures
+                error_msg = result_data.get('error') or result_data.get('message') or 'Unknown error'
+                error_msg = self._sanitize_commander_error(error_msg)
                 return {
                     'success': False,
                     'error': f"Failed to create record: {error_msg}"
@@ -1501,12 +1888,19 @@ class KeeperClient:
                             continue
                         uid = item.get('Folder UID', '')
                         name = item.get('Folder Name', '')
+                        # ``Type`` from share-report is the source of truth for
+                        # Classic vs NSF at the top level: "Nested Share Folder"
+                        # -> NSF (nsf-record-add); anything else (e.g. "Shared
+                        # Folder") -> Classic (record-add).
+                        folder_type = item.get('Type', 'Shared Folder')
+                        is_nsf = folder_type.strip().lower() == 'nested share folder'
                         if uid and name and uid not in seen_uids:
                             seen_uids.add(uid)
                             folders.append({
                                 'uid': uid,
                                 'name': name,
-                                'type': 'shared_folder'
+                                'type': folder_type,
+                                'is_nsf': is_nsf,
                             })
                     logger.debug(
                         f"Retrieved {len(folders)} shared folder(s) for {user_email} "
@@ -1564,13 +1958,16 @@ class KeeperClient:
                     uid = item.get('uid', '')
                     name = item.get('name', '')
                     path = item.get('path', name)
+
+                    is_nsf = '[nested share folder]' in name.lower()
                     if uid and name:
                         subfolders.append({
                             'uid': uid,
                             'name': name,
                             'path': path,
                             'level': item.get('level', 0),
-                            'type': item.get('type', 'folder')
+                            'type': item.get('type', 'folder'),
+                            'is_nsf': is_nsf,
                         })
                 logger.debug(f"Retrieved {len(subfolders)} subfolder(s) for {shared_folder_uid}")
                 return subfolders

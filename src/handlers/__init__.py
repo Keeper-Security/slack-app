@@ -20,6 +20,8 @@ from .modals import (
     handle_resync_vault_action,
     handle_create_new_record_action,
     handle_create_record_submit,
+    handle_item_selection_action,
+    handle_create_record_classic_vault_action,
 )
 from .pedm_approvals import handle_approve_pedm_request, handle_deny_pedm_request
 
@@ -33,6 +35,8 @@ __all__ = [
     'handle_resync_vault_action',
     'handle_create_new_record_action',
     'handle_create_record_submit',
+    'handle_item_selection_action',
+    'handle_create_record_classic_vault_action',
     'handle_approve_pedm_request',
     'handle_deny_pedm_request',
 ]
