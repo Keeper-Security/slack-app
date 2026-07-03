@@ -16,7 +16,8 @@ from typing import Dict, Any
 from ..models import RequestType
 from ..utils import (
     generate_approval_id, is_valid_uid, parse_command_text,
-    sanitize_user_input, MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH
+    sanitize_user_input, MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
+    resolve_approval_channel
 )
 from ..views import post_approval_request
 from ..logger import logger
@@ -122,12 +123,16 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
     
     # Generate unique approval ID
     approval_id = generate_approval_id()
-    
+
+    # Multi-channel approver: route to the requester's team channel when
+    # enabled, else the default approvals channel.
+    approvals_channel = resolve_approval_channel(config, keeper_client, client, user_id)
+
     # Post approval request to approvals channel
     try:
         post_approval_request(
             client=client,
-            approvals_channel=config.slack.approvals_channel_id,
+            approvals_channel=approvals_channel,
             approval_id=approval_id,
             requester_id=user_id,
             requester_name=user_name,
@@ -145,7 +150,7 @@ def handle_one_time_share(body: Dict[str, Any], client, respond, config, keeper_
                  f"Request ID: `{approval_id}`\n"
                  f"Record: `{identifier}`\n"
                  f"Justification: {justification}\n\n"
-                 f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+                 f"Your request has been sent to <#{approvals_channel}> for approval.\n"
                  f"Once approved, the one-time share link will be sent to you via DM.",
             response_type="ephemeral"
         )

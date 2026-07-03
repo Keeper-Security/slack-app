@@ -23,12 +23,36 @@ from ..utils import (
     generate_approval_id, is_valid_uid, sanitize_user_input,
     MAX_JUSTIFICATION_LENGTH, MAX_IDENTIFIER_LENGTH,
     is_record_owner_error, is_permission_conflict_error,
-    format_approval_audit_log
+    format_approval_audit_log, resolve_approval_channel
 )
 from ..logger import logger
 
 
 _COMMANDER_REJECTED_CODES = (COMMAND_NOT_ALLOWED, COMMANDER_UNAUTHORIZED)
+
+
+def _apply_boundary_scope(
+    config, keeper_client, client, body, search_type, results,
+    approval_data: Optional[dict] = None,
+):
+    """
+    Restrict search results to the team-allowed UIDs for this approval channel.
+
+    No-op when boundary enforcement is disabled (the boundary module returns a
+    ``None`` scope, which the filters pass through unchanged). Kept as a thin
+    wrapper so every search call site routes through one place.
+    """
+    from ..approver_boundary import (
+        resolve_allowed_scope, filter_records, filter_folders,
+    )
+    user_id = body.get("user", {}).get("id", "")
+    channel_id = (approval_data or {}).get("channel_id")
+    folder_scope, record_scope = resolve_allowed_scope(
+        config, keeper_client, client, user_id, channel_id=channel_id,
+    )
+    if search_type == "record":
+        return filter_records(results, record_scope)
+    return filter_folders(results, folder_scope)
 
 
 def _maybe_commander_search_error_banner(
@@ -234,8 +258,15 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
     # Extract values from form
     values = body["view"]["state"]["values"]
     
-    # Check if user modified search query
-    new_query = values.get("search_query", {}).get("update_search_query", {}).get("value", "").strip()
+    # Check if user modified search query. ``or ""`` guards against Slack
+    # sending ``"value": null`` for an empty input (the "", default only
+    # applies to a missing key), which would otherwise crash on .strip().
+    new_query = (
+        values.get("search_query", {})
+        .get("update_search_query", {})
+        .get("value", "")
+        or ""
+    ).strip()
     search_type = approval_data.get("search_type", approval_data.get("type", "record"))
     
     logger.debug(f"Modal submit - new_query: '{new_query}', search_type: {search_type}")
@@ -294,12 +325,30 @@ def handle_search_modal_submit(ack, body: Dict[str, Any], client, config, keeper
         # for OTS requests (Commander's ``one-time-share`` supports neither).
         request_type = approval_data.get("type", "record")
         for_one_time_share = request_type == "one_time_share"
-        if search_type == "record":
-            results, search_error = keeper_client.search_records(
-                new_query, limit=20, for_one_time_share=for_one_time_share
-            )
+        # Catalog mode (additive; no-op when boundary scoping is not active
+        # for this kind, i.e. single-channel approver flow is unchanged).
+        from ..approver_catalog import maybe_catalog_fetch
+        _user_id = body.get("user", {}).get("id", "")
+        catalog = maybe_catalog_fetch(
+            config, keeper_client, client, _user_id,
+            search_type, new_query, approval_data,
+            for_one_time_share=for_one_time_share,
+        )
+        if catalog is not None:
+            results = catalog
+            search_error = None
         else:
-            results, search_error = keeper_client.search_folders(new_query, limit=20)
+            if search_type == "record":
+                results, search_error = keeper_client.search_records(
+                    new_query, limit=20, for_one_time_share=for_one_time_share
+                )
+            else:
+                results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+            results = _apply_boundary_scope(
+                config, keeper_client, client, body, search_type, results,
+                approval_data=approval_data,
+            )
 
         search_banner = _maybe_commander_search_error_banner(
             client=client,
@@ -1084,28 +1133,47 @@ def handle_resync_vault_action(body: Dict[str, Any], client, config, keeper_clie
     approval_data.pop("selected_uid", None)
     approval_data.pop("selected_folder_is_pam_user", None)
 
-    if not new_query:
-        # No query yet - just refresh the modal so the user can type one.
-        try:
-            client.views_update(
-                view_id=view_id,
-                view=build_search_modal(
-                    query=new_query,
-                    search_type=search_type,
-                    results=[],
-                    approval_data=approval_data,
-                ),
-            )
-        except Exception as e:
-            logger.error(f"Failed to refresh search modal after sync: {e}")
-        return
-
-    if search_type == "record":
-        results, search_error = keeper_client.search_records(
-            new_query, limit=20, for_one_time_share=for_one_time_share
-        )
+    # Catalog mode (additive; no-op when boundary scoping is not active for
+    # this kind). Evaluated before the empty-query short-circuit because a
+    # catalog view is meaningful even without a search term -- it just
+    # renders the full scoped list.
+    from ..approver_catalog import maybe_catalog_fetch
+    catalog = maybe_catalog_fetch(
+        config, keeper_client, client, user_id,
+        search_type, new_query, approval_data,
+        for_one_time_share=for_one_time_share,
+    )
+    if catalog is not None:
+        results = catalog
+        search_error = None
     else:
-        results, search_error = keeper_client.search_folders(new_query, limit=20)
+        if not new_query:
+            # No query yet - just refresh the modal so the user can type one.
+            try:
+                client.views_update(
+                    view_id=view_id,
+                    view=build_search_modal(
+                        query=new_query,
+                        search_type=search_type,
+                        results=[],
+                        approval_data=approval_data,
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"Failed to refresh search modal after sync: {e}")
+            return
+
+        if search_type == "record":
+            results, search_error = keeper_client.search_records(
+                new_query, limit=20, for_one_time_share=for_one_time_share
+            )
+        else:
+            results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+        results = _apply_boundary_scope(
+            config, keeper_client, client, body, search_type, results,
+            approval_data=approval_data,
+        )
 
     sync_banner = _maybe_commander_search_error_banner(
         client=client,
@@ -1143,8 +1211,18 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     values = view["state"]["values"]
     approval_data = json.loads(view["private_metadata"])
     
-    # Get updated search query
-    new_query = values.get("search_query", {}).get("update_search_query", {}).get("value", "").strip()
+    # Get updated search query. Slack sends ``"value": null`` (not a missing
+    # key) for an empty input, so ``.get("value", "")`` yields ``None`` and a
+    # bare ``.strip()`` raises AttributeError. The ``or ""`` collapses both
+    # None and "" to "" before stripping (same defensive pattern as
+    # handle_resync_vault_action). Empty Refine is common in catalog mode
+    # where the approver clears the box to see their full allowed list.
+    new_query = (
+        values.get("search_query", {})
+        .get("update_search_query", {})
+        .get("value", "")
+        or ""
+    ).strip()
     search_type = approval_data.get("search_type", "record")
     
     logger.debug(f"Refining search with query: '{new_query}'")
@@ -1158,12 +1236,31 @@ def handle_refine_search_action(body: Dict[str, Any], client, config, keeper_cli
     # OTS requests (Commander's ``one-time-share`` supports neither).
     request_type = approval_data.get("type", "record")
     for_one_time_share = request_type == "one_time_share"
-    if search_type == "record":
-        results, search_error = keeper_client.search_records(
-            new_query, limit=20, for_one_time_share=for_one_time_share
-        )
+    # Catalog mode (additive; no-op when boundary scoping is not active for
+    # this kind). Refine is a client-side filter over the re-hydrated
+    # scoped list; no Commander search runs in that mode.
+    from ..approver_catalog import maybe_catalog_fetch
+    _user_id = body.get("user", {}).get("id", "")
+    catalog = maybe_catalog_fetch(
+        config, keeper_client, client, _user_id,
+        search_type, new_query, approval_data,
+        for_one_time_share=for_one_time_share,
+    )
+    if catalog is not None:
+        results = catalog
+        search_error = None
     else:
-        results, search_error = keeper_client.search_folders(new_query, limit=20)
+        if search_type == "record":
+            results, search_error = keeper_client.search_records(
+                new_query, limit=20, for_one_time_share=for_one_time_share
+            )
+        else:
+            results, search_error = keeper_client.search_folders(new_query, limit=20)
+
+        results = _apply_boundary_scope(
+            config, keeper_client, client, body, search_type, results,
+            approval_data=approval_data,
+        )
 
     refine_banner = _maybe_commander_search_error_banner(
         client=client,
@@ -1503,11 +1600,15 @@ def handle_request_record_modal_submit(body: Dict[str, Any], client, config, kee
     
     # Generate approval ID and post request
     approval_id = generate_approval_id()
-    
+
+    # Multi-channel approver: route to the requester's team channel when
+    # enabled, else the default approvals channel.
+    approvals_channel = resolve_approval_channel(config, keeper_client, client, user_id)
+
     try:
         post_approval_request(
             client=client,
-            approvals_channel=config.slack.approvals_channel_id,
+            approvals_channel=approvals_channel,
             approval_id=approval_id,
             requester_id=user_id,
             requester_name=user_name,
@@ -1526,7 +1627,7 @@ def handle_request_record_modal_submit(body: Dict[str, Any], client, config, kee
             f"Request ID: `{approval_id}`\n"
             f"Record: `{identifier}`\n"
             f"Justification: {justification}\n\n"
-            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Your request has been sent to <#{approvals_channel}> for approval.\n"
             f"Once approved, please check your DM for details."
         )
         
@@ -1622,11 +1723,15 @@ def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, kee
     
     # Generate approval ID and post request
     approval_id = generate_approval_id()
-    
+
+    # Multi-channel approver: route to the requester's team channel when
+    # enabled, else the default approvals channel.
+    approvals_channel = resolve_approval_channel(config, keeper_client, client, user_id)
+
     try:
         post_approval_request(
             client=client,
-            approvals_channel=config.slack.approvals_channel_id,
+            approvals_channel=approvals_channel,
             approval_id=approval_id,
             requester_id=user_id,
             requester_name=user_name,
@@ -1646,7 +1751,7 @@ def handle_request_folder_modal_submit(body: Dict[str, Any], client, config, kee
             f"Request ID: `{approval_id}`\n"
             f"Folder: `{identifier}`\n"
             f"Justification: {justification}\n\n"
-            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Your request has been sent to <#{approvals_channel}> for approval.\n"
             f"Once approved, please check your DM for details."
         )
         
@@ -1714,11 +1819,15 @@ def handle_one_time_share_modal_submit(body: Dict[str, Any], client, config, kee
     
     # Generate approval ID and post request
     approval_id = generate_approval_id()
-    
+
+    # Multi-channel approver: route to the requester's team channel when
+    # enabled, else the default approvals channel.
+    approvals_channel = resolve_approval_channel(config, keeper_client, client, user_id)
+
     try:
         post_approval_request(
             client=client,
-            approvals_channel=config.slack.approvals_channel_id,
+            approvals_channel=approvals_channel,
             approval_id=approval_id,
             requester_id=user_id,
             requester_name=user_name,
@@ -1737,7 +1846,7 @@ def handle_one_time_share_modal_submit(body: Dict[str, Any], client, config, kee
             f"Request ID: `{approval_id}`\n"
             f"Record: `{identifier}`\n"
             f"Justification: {justification}\n\n"
-            f"Your request has been sent to <#{config.slack.approvals_channel_id}> for approval.\n"
+            f"Your request has been sent to <#{approvals_channel}> for approval.\n"
             f"Once approved, the one-time share link will be sent to you via DM."
         )
         

@@ -299,6 +299,133 @@ def _extract_field_value(secret, field_label_pattern: str, field_type: Optional[
         return None
 
 
+def _extract_json_like_field_value(secret, field_label_pattern: str):
+    """
+    Extract a KSM field that may hold a JSON array/object.
+
+    Unlike ``_extract_field_value``, this preserves list/dict structure.
+    ``_extract_field_value`` collapses lists to their first scalar element,
+    which breaks ``approvals_teams`` when KSM returns a parsed list.
+    """
+    def _unwrap(field_obj):
+        if field_obj is None:
+            return None
+        if isinstance(field_obj, (list, tuple)):
+            if field_obj and all(isinstance(x, dict) for x in field_obj):
+                return list(field_obj)
+            if len(field_obj) > 0:
+                return _unwrap(field_obj[0])
+            return None
+        if isinstance(field_obj, dict):
+            return field_obj
+        if isinstance(field_obj, str):
+            text = field_obj.strip()
+            if text.startswith('[') or text.startswith('{'):
+                try:
+                    return json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return text if text else None
+        if isinstance(field_obj, (int, float, bool)):
+            return field_obj
+        if hasattr(field_obj, 'value'):
+            return _unwrap(field_obj.value)
+        if hasattr(field_obj, 'get_default_value'):
+            try:
+                return _unwrap(field_obj.get_default_value(str))
+            except Exception:
+                pass
+        return None
+
+    labels = [
+        field_label_pattern,
+        field_label_pattern.replace('_', '-'),
+        field_label_pattern.replace('-', '_'),
+    ]
+    seen = set()
+    for label in labels:
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        for getter_name in ('field', 'custom_field'):
+            try:
+                getter = getattr(secret, getter_name)
+                field_obj = getter(label)
+            except (AttributeError, KeyError, ValueError, TypeError):
+                continue
+            value = _unwrap(field_obj)
+            if value is not None:
+                return value
+    return None
+
+
+def _resolve_approval_teams_field(secret, notes_json=None):
+    """
+    Read the approval-teams list from KSM.
+
+    Canonical field name: ``approvals_teams`` (slack-app-setup record).
+    Legacy alias: ``approval_teams``.
+    """
+    if isinstance(notes_json, dict):
+        if 'approvals_teams' in notes_json:
+            return notes_json['approvals_teams']
+        if 'approval_teams' in notes_json:
+            return notes_json['approval_teams']
+
+    for field_name in ('approvals_teams', 'approval_teams'):
+        value = _extract_json_like_field_value(secret, field_name)
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_approval_teams_config(enabled_field, approval_teams_field):
+    """
+    Convert the KSM ``multi_channel_approvers_enabled`` + ``approvals_teams``
+    fields into the internal ``multichannel_approver`` dict used everywhere
+    else (same shape as slack_config.yaml).
+
+    Field mapping per team:
+      team_uid    -> team_uid (carried, not used for matching today)
+      name        -> name
+      channel_id  -> channel_id
+      folder_uids -> allowed_folder_uids
+      record_uids -> allowed_record_uids
+
+    Returns ``None`` when neither field is present so callers can fall back to
+    the legacy ``multichannel_approver`` notes block.
+    """
+    if enabled_field is None and approval_teams_field is None:
+        return None
+
+    teams_list = approval_teams_field
+    if isinstance(teams_list, str):
+        try:
+            teams_list = json.loads(teams_list)
+        except (json.JSONDecodeError, TypeError):
+            teams_list = None
+
+    normalized_teams = []
+    if isinstance(teams_list, list):
+        for t in teams_list:
+            if not isinstance(t, dict):
+                continue
+            normalized_teams.append({
+                'team_uid': t.get('team_uid'),
+                'name': t.get('name'),
+                'channel_id': t.get('channel_id'),
+                'allowed_folder_uids': t.get('folder_uids', []) or [],
+                'allowed_record_uids': t.get('record_uids', []) or [],
+            })
+
+    if isinstance(enabled_field, str):
+        enabled = enabled_field.strip().lower() in ('true', '1', 'yes')
+    else:
+        enabled = bool(enabled_field)
+
+    return {'enabled': enabled, 'teams': normalized_teams}
+
+
 def fetch_credentials_from_ksm(
     ksm_config: Optional[str] = None,
     commander_record_title: Optional[str] = None,
@@ -378,6 +505,11 @@ def fetch_credentials_from_ksm(
                 slack_config = {}
                 pedm_config = {}
                 device_approval_config = {}
+                # Multi-channel approver routing is structured (enabled + a
+                # teams[] list), so it lives in the slack record's notes JSON
+                # rather than a flat field. Local dev reads it from
+                # slack_config.yaml; prod reads it here from KSM.
+                multichannel_config = None
                 
                 # Extract Slack fields with exact names
                 app_token = _extract_field_value(secret, 'slack_app_token')
@@ -392,6 +524,14 @@ def fetch_credentials_from_ksm(
                 # Extract Device Approval config
                 device_enabled = _extract_field_value(secret, 'device_approval_enabled')
                 device_interval = _extract_field_value(secret, 'device_approval_polling_interval')
+
+                # Multi-channel approver (new KSM shape written by slack-app-setup):
+                #   multi_channel_approvers_enabled : bool
+                #   approvals_teams : [{team_uid, name, channel_id,
+                #                       folder_uids, record_uids}]
+                # Legacy alias: approval_teams (no trailing 's' on approval)
+                mc_enabled_field = _extract_field_value(secret, 'multi_channel_approvers_enabled')
+                approval_teams_field = _resolve_approval_teams_field(secret)
                 
                 # Check notes for JSON config (overrides field values)
                 try:
@@ -418,6 +558,15 @@ def fetch_credentials_from_ksm(
                                 device_enabled = notes_json['device_approval_enabled']
                             if 'device_approval_polling_interval' in notes_json:
                                 device_interval = notes_json['device_approval_polling_interval']
+                            # Multi-channel approver routing (enabled + teams[])
+                            if 'multichannel_approver' in notes_json:
+                                multichannel_config = notes_json['multichannel_approver']
+                            # New shape (preferred): flat enabled + approvals_teams[]
+                            if 'multi_channel_approvers_enabled' in notes_json:
+                                mc_enabled_field = notes_json['multi_channel_approvers_enabled']
+                            resolved_teams = _resolve_approval_teams_field(secret, notes_json)
+                            if resolved_teams is not None:
+                                approval_teams_field = resolved_teams
                         except (json.JSONDecodeError, TypeError):
                             pass
                 except Exception:
@@ -497,6 +646,29 @@ def fetch_credentials_from_ksm(
                     config_data['pedm'] = pedm_config
                 if device_approval_config:
                     config_data['device_approval'] = device_approval_config
+                # Normalize the new KSM shape (multi_channel_approvers_enabled +
+                # approvals_teams[]) into the internal `multichannel_approver`
+                # structure the rest of the app already understands. This takes
+                # precedence over the legacy `multichannel_approver` notes block.
+                #   approvals_teams[].folder_uids -> teams[].allowed_folder_uids
+                #   approvals_teams[].record_uids -> teams[].allowed_record_uids
+                normalized_mc = _normalize_approval_teams_config(
+                    mc_enabled_field, approval_teams_field
+                )
+                if normalized_mc is not None:
+                    multichannel_config = normalized_mc
+
+                # Pass the multi-channel approver block straight through; the
+                # Config.multichannel_approver property normalizes/validates the
+                # enabled flag and teams list (same shape as slack_config.yaml).
+                if multichannel_config is not None:
+                    if isinstance(multichannel_config, str):
+                        try:
+                            multichannel_config = json.loads(multichannel_config)
+                        except (json.JSONDecodeError, TypeError):
+                            multichannel_config = None
+                    if isinstance(multichannel_config, dict):
+                        config_data['multichannel_approver'] = multichannel_config
         except Exception as e:
             logger.error(f"Failed to fetch slack record: {e}")
             import traceback

@@ -198,9 +198,15 @@ def handle_create_secret_submit(ack, body: Dict[str, Any], client, config, keepe
             )
             
             from ..views import post_create_secret_notification
+            from ..utils import resolve_approval_channel
+            # Multi-channel approver: route the creation notice to the
+            # creator's team channel when enabled, else the default channel.
+            notify_channel = resolve_approval_channel(
+                config, keeper_client, client, user_id
+            )
             post_create_secret_notification(
                 client=client,
-                approvals_channel=config.slack.approvals_channel_id,
+                approvals_channel=notify_channel,
                 user_id=user_id,
                 record_uid=record_uid,
                 record_title=title,

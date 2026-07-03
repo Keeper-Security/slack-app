@@ -46,6 +46,74 @@ from .handlers.device_approvals import (
 from .app_home import AppHomeHandler
 
 
+def _log_multichannel_summary(config) -> None:
+    """
+    Emit a one-shot startup summary of multi-channel approver + scope state.
+
+    Purely diagnostic: reads the already-loaded config and prints a compact
+    picture of what will happen at request time. Works identically for local
+    ``slack_config.yaml`` and KSM, since both populate the same
+    ``multichannel_approver`` block during load.
+    """
+    default_channel = config.slack.approvals_channel_id
+    mc_raw = config.get('multichannel_approver', {}) or {}
+    enabled = bool(mc_raw.get('enabled', False))
+
+    # Config source (best-effort). KSM overrides file when both are present.
+    source_file = getattr(config, 'source_file', None)
+    ksm_loaded = getattr(config, 'ksm_loaded', False)
+    if ksm_loaded and source_file:
+        source = f"KSM (over file: {source_file})"
+    elif ksm_loaded:
+        source = "KSM"
+    elif source_file:
+        source = source_file
+    else:
+        source = "defaults / env"
+    logger.info(f"Config source: {source}")
+
+    if not enabled:
+        logger.info(
+            f"Multi-channel approver: disabled -> all requests route to "
+            f"default channel {default_channel}"
+        )
+        return
+
+    teams = [t for t in (mc_raw.get('teams', []) or []) if isinstance(t, dict)]
+    total = len(teams)
+    scoped_teams = sum(
+        1 for t in teams
+        if (t.get('allowed_folder_uids') or [])
+        or (t.get('allowed_record_uids') or [])
+    )
+
+    if scoped_teams == 0:
+        logger.info(
+            f"Multi-channel approver: enabled, {total} team(s) mapped, "
+            f"scoping OFF (no UIDs configured -> routing-only mode)"
+        )
+    else:
+        logger.info(
+            f"Multi-channel approver: enabled, {total} team(s) mapped, "
+            f"scoping ON ({scoped_teams} team(s) with UIDs)"
+        )
+
+    for team in teams:
+        name = str(team.get('name', '')).strip() or "<unnamed>"
+        channel_id = str(team.get('channel_id', '')).strip() or "<no channel>"
+        folder_uids = team.get('allowed_folder_uids') or []
+        record_uids = team.get('allowed_record_uids') or []
+        if folder_uids or record_uids:
+            logger.info(
+                f"  - {name} -> {channel_id} "
+                f"(folders={len(folder_uids)}, records={len(record_uids)})"
+            )
+        else:
+            logger.info(f"  - {name} -> {channel_id} (no UIDs -> routing-only)")
+
+    logger.info(f"Default approval channel (fallback): {default_channel}")
+
+
 class KeeperSlackApp:
     """
     Keeper Commander Slack Application.
@@ -84,6 +152,7 @@ class KeeperSlackApp:
         )
         logger.ok("Socket Mode handler ready")
         logger.info(f"Approval channel: {self.config.slack.approvals_channel_id}")
+        _log_multichannel_summary(self.config)
         
         # Initialize PEDM poller (uses config for interval and enabled flag)
         from .background import PEDMPoller
