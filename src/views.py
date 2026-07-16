@@ -652,6 +652,13 @@ def build_search_modal(
     metadata = approval_data.copy()
     metadata['search_type'] = search_type
     metadata['query'] = query
+
+    # Catalog mode (approver boundary scoping active): the results list is the
+    # admin-curated set of allowed items for this approver's team, not a
+    # Commander search. All UI tweaks below are purely additive so single-
+    # channel / boundary-off flows render byte-for-byte the same as before.
+    _catalog_mode = bool(approval_data.get('catalog_mode'))
+    _catalog_scope_size = approval_data.get('scope_size') if _catalog_mode else None
     
     # Cache results as serializable dicts (KeeperRecord/KeeperFolder objects can't be JSON serialized)
     if results:
@@ -687,21 +694,69 @@ def build_search_modal(
         })
         blocks.append({"type": "divider"})
 
+    # Catalog-mode disclosure banner. Rendered at the top of the modal so
+    # approvers see the restriction rule before scanning results. Wording is
+    # kind-aware (records vs folders) so it matches whichever modal is open.
+    # Purely additive: only appears when maybe_catalog_fetch set catalog_mode
+    # in approval_data (i.e. boundary scoping is active for this kind).
+    if _catalog_mode:
+        _kind_word = "records" if search_type == "record" else "folders"
+        blocks.append({
+            "type": "section",
+            "block_id": "catalog_scope_banner",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    ":lock: *Approver scope active.* You can only view and "
+                    f"approve {_kind_word} configured for your team. To see "
+                    f"or approve other {_kind_word}, ask your Keeper admin "
+                    "to add them to your team's scope."
+                ),
+            },
+        })
+        blocks.append({"type": "divider"})
+
+    if _catalog_mode:
+        _search_label = "Filter Your Allowed Items"
+        _search_placeholder = "Type to filter within your team's allowed items..."
+        _search_hint = (
+            "Filters the list of items your team is allowed to approve. "
+            "Click Refine to apply."
+        )
+    else:
+        _search_label = "Search Term"
+        _search_placeholder = "Type your search query..."
+        _search_hint = "Modify the search term and click the Refine button below"
     blocks.append({
         "type": "input",
         "block_id": "search_query",
-        "label": {"type": "plain_text", "text": "Search Term"},
+        "label": {"type": "plain_text", "text": _search_label},
         "element": {
             "type": "plain_text_input",
             "action_id": "update_search_query",
             "initial_value": query,
-            "placeholder": {"type": "plain_text", "text": "Type your search query..."}
+            "placeholder": {"type": "plain_text", "text": _search_placeholder}
         },
         "hint": {
             "type": "plain_text",
-            "text": "Modify the search term and click the Refine button below"
+            "text": _search_hint,
         }
     })
+
+    if _catalog_mode and not loading:
+        _scope_note = (
+            f"Showing {len(results)} of {_catalog_scope_size} item(s) "
+            f"allowed for your team."
+            if isinstance(_catalog_scope_size, int)
+            else f"Showing {len(results)} item(s) allowed for your team."
+        )
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f":lock: *Approver scope active.* {_scope_note}",
+            }],
+        })
     
     # Build action buttons (Refine Search + optionally Create New Record)
     # Use slim metadata for button values
@@ -752,17 +807,21 @@ def build_search_modal(
     # rendering it as a section + accessory keeps the button visually attached
     # to the line it controls (refresh the current search/list) without taking
     # up its own row, and lets us hide the accessory during the loading state
-    # so a slow sync can't be double-triggered.
-    results_text = (
-        "_Searching..._"
-        if loading
-        else f"_Showing {len(results)} result(s) for: `{query}`_"
-    )
+    # so a slow sync can't be double-triggered. Also hidden in catalog mode
+    # (approver scope active): the list is a fixed admin-curated UID set, so
+    # sync-down cannot surface new items and is misleading there.
+    if loading:
+        results_text = "_Searching..._"
+    elif _catalog_mode:
+        _q_suffix = f" matching `{query}`" if query else ""
+        results_text = f"_Showing {len(results)} allowed item(s){_q_suffix}_"
+    else:
+        results_text = f"_Showing {len(results)} result(s) for: `{query}`_"
     results_block: Dict[str, Any] = {
         "type": "section",
         "text": {"type": "mrkdwn", "text": results_text},
     }
-    if not loading:
+    if not loading and not _catalog_mode:
         results_block["accessory"] = {
             "type": "button",
             "text": {
@@ -1045,8 +1104,34 @@ def build_search_modal(
                 }]
             })
         else:
-            message_text = f"No {search_type}s found matching `{query}`\n\n_Try modifying your search above and click 'Refine Search' to see updated results_"
-            
+            if _catalog_mode:
+                if isinstance(_catalog_scope_size, int) and _catalog_scope_size == 0:
+                    message_text = (
+                        f"No {search_type}s are currently allowed for your team.\n\n"
+                        "_Contact your Keeper admin to add "
+                        f"{search_type} UIDs to your team's approval scope._"
+                    )
+                elif query:
+                    message_text = (
+                        f"No allowed {search_type}s match `{query}`.\n\n"
+                        "_Clear the filter and click 'Refine Search' to see "
+                        "your team's full allowed list._"
+                    )
+                else:
+                    message_text = (
+                        f"None of your team's allowed {search_type} UIDs are "
+                        "currently readable (they may have been deleted or "
+                        "you may not have access).\n\n"
+                        "_Contact your Keeper admin to review the team's "
+                        "approval scope._"
+                    )
+            else:
+                message_text = (
+                    f"No {search_type}s found matching `{query}`\n\n"
+                    "_Try modifying your search above and click "
+                    "'Refine Search' to see updated results_"
+                )
+
             blocks.append({
                 "type": "section",
                 "text": {

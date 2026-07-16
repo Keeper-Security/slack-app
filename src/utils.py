@@ -506,6 +506,36 @@ def get_user_email_from_slack(client, user_id: str) -> str:
         return f"{user_id}@slack.user"
 
 
+def resolve_approval_channel(config, keeper_client, client, requester_user_id: str) -> str:
+    """
+    Resolve which Slack channel an approval request should be posted to.
+    """
+    default_channel = config.slack.approvals_channel_id
+    try:
+        mc = config.multichannel_approver
+        if not mc.enabled or not mc.teams:
+            return default_channel
+
+        email = get_user_email_from_slack(client, requester_user_id)
+        teams = keeper_client.get_user_teams(email)
+        for team_name in teams:
+            channel = mc.teams.get(team_name)
+            if channel:
+                logger.info(
+                    f"Multi-channel routing: {email} -> team '{team_name}' -> {channel}"
+                )
+                return channel
+
+        logger.info(
+            f"Multi-channel routing: no mapped team for {email}; "
+            f"using default channel {default_channel}"
+        )
+        return default_channel
+    except Exception as e:
+        logger.error(f"Error resolving approval channel: {e}; using default channel")
+        return default_channel
+
+
 def send_dm(client, user_id: str, text: str, blocks: Optional[list] = None) -> bool:
     """
     Send a direct message to a Slack user.

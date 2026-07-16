@@ -15,7 +15,7 @@
 import os
 import yaml
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .logger import logger
 from .utils import fix_service_url_for_docker
@@ -71,6 +71,20 @@ class DeviceApprovalConfig:
     """Polling interval in seconds (default: 120 = 2 minutes)"""
 
 
+@dataclass
+class MultiChannelApproverConfig:
+    """Team-based multi-channel approver routing configuration."""
+
+    enabled: bool = False
+    """Whether team-based approval routing is enabled. When False, all
+    approval requests go to the single global approvals channel (current
+    behavior)."""
+
+    teams: Dict[str, str] = field(default_factory=dict)
+    """Mapping of Keeper team name -> Slack approval channel ID. Sourced from
+    slack_config.yaml for local dev today; later from KSM."""
+
+
 class Config:
     """
     Application configuration manager.
@@ -83,6 +97,10 @@ class Config:
         Initialize configuration.
         """
         self._data = {}
+        # Source tracking (used only for startup diagnostics; does not affect
+        # runtime behavior). Both may be true when KSM overrides a local file.
+        self.source_file: Optional[str] = None
+        self.ksm_loaded: bool = False
         
         # Try to load from file (for local development)
         if config_path and os.path.exists(config_path):
@@ -104,6 +122,7 @@ class Config:
                 file_config = yaml.safe_load(f)
                 if file_config:
                     self._data.update(file_config)
+                    self.source_file = config_path
         except Exception as e:
             logger.warning(f"Could not load config file {config_path}: {e}")
     
@@ -186,7 +205,8 @@ class Config:
                 if section not in self._data:
                     self._data[section] = {}
                 self._data[section].update(values)
-                
+
+            self.ksm_loaded = True
             logger.info("Loaded configuration from KSM records")
         except Exception as e:
             logger.warning(f"Failed to load from KSM: {e}")
@@ -289,6 +309,33 @@ class Config:
             polling_interval_in_sec=device_data.get('polling_interval_in_sec', 120)
         )
     
+    @property
+    def multichannel_approver(self) -> MultiChannelApproverConfig:
+        """
+        Get team-based multi-channel approver routing configuration.
+
+        Expected YAML shape (optional section; absence => disabled):
+
+            multichannel_approver:
+              enabled: true
+              teams:
+                - name: "Developer Team"
+                  channel_id: "C0A42QVAY4A"
+        """
+        mc_data = self._data.get('multichannel_approver', {}) or {}
+        teams_map: Dict[str, str] = {}
+        for entry in (mc_data.get('teams', []) or []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get('name')
+            channel_id = entry.get('channel_id')
+            if name and channel_id:
+                teams_map[str(name).strip()] = str(channel_id).strip()
+        return MultiChannelApproverConfig(
+            enabled=bool(mc_data.get('enabled', False)),
+            teams=teams_map,
+        )
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value by key."""
         return self._data.get(key, default)

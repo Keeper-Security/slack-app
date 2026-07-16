@@ -231,82 +231,120 @@ class KeeperClient:
             import traceback
             traceback.print_exc()
         return [], None
-    
+
+    _FOLDER_ITEM_TYPES = frozenset({
+        'shared_folder', 'nested_share_folder', 'user_folder', 'folder',
+    })
+
+    @staticmethod
+    def _pick_search_result_by_uid(
+        data: Any, uid: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the search row whose ``uid`` exactly matches ``uid``.
+
+        Commander ``search <uid>`` can return multiple rows; the first row is
+        not always the requested item (e.g. a nearby record can appear first).
+        """
+        if not isinstance(data, list) or not uid:
+            return None
+        target = str(uid).strip()
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('uid', '')).strip() == target:
+                return item
+        return None
+
+    def _search_items_by_uid(self, uid: str) -> List[Dict[str, Any]]:
+        """Run ``search <uid> --format=json`` and return the result rows."""
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": f"search {uid} --format=json"},
+                timeout=10,
+            )
+            if response.status_code != 202:
+                logger.error(
+                    f"Failed to submit search command for {uid}: "
+                    f"{response.status_code}"
+                )
+                return []
+
+            result_id = response.json().get('request_id')
+            if not result_id:
+                logger.error(f"No request_id received for search {uid}")
+                return []
+
+            final_result = self._poll_for_result(result_id)
+            if not final_result:
+                logger.warning(f"Search timed out for UID: {uid}")
+                return []
+
+            data = final_result.get('data')
+            if not isinstance(data, list):
+                return []
+            return [row for row in data if isinstance(row, dict)]
+        except Exception as e:
+            logger.error(f"Search failed for UID {uid}: {e}")
+            return []
+
     def get_record_by_uid(self, record_uid: str) -> Optional[KeeperRecord]:
         """
         Get record details by UID using Service Mode.
         """
 
         try:
-            # Submit search command with UID
-            response = self.session.post(
-                f'{self.base_url}/executecommand-async',
-                json={"command": f"search {record_uid} --format=json"},
-                timeout=10
-            )
-            
-            if response.status_code != 202:
-                logger.error(f"Failed to submit search command: {response.status_code}")
-                return None
-            
-            result_data = response.json()
-            result_id = result_data.get('request_id')
-            
-            if not result_id:
-                logger.error("No result_id in response")
-                return None
-            
-            # Poll for results
-            final_result = self._poll_for_result(result_id)
-            
-            if not final_result:
-                logger.warning(f"No record found for UID: {record_uid}")
-                return None
-            
-            # Parse the search results - data is directly in the response
-            data = final_result.get('data')
-            
-            if not data or not isinstance(data, list) or len(data) == 0:
-                logger.warning(f"No records in search results for UID: {record_uid}")
+            data = self._search_items_by_uid(record_uid)
+            if not data:
+                logger.warning(f"No search results for record UID: {record_uid}")
                 return None
 
-            record_data = data[0]
-            
+            record_data = self._pick_search_result_by_uid(data, record_uid)
+            if not record_data:
+                logger.warning(
+                    f"No exact record match for UID {record_uid} "
+                    f"in {len(data)} search result(s)"
+                )
+                return None
+
             # Extract basic fields
             title = record_data.get('name', 'Untitled Record')
             uid = record_data.get('uid', record_uid)
 
             # Check the 'type' field FIRST - this tells us if it's a folder or record
             item_type = record_data.get('type', 'record')
+
+            if item_type in self._FOLDER_ITEM_TYPES:
+                logger.warning(
+                    f"UID {record_uid} resolved to folder type {item_type!r}; "
+                    f"expected a record"
+                )
+                return None
             
             # Initialize notes
             notes = ''
-            
-            # If it's a folder type, preserve that type
-            if item_type in ['shared_folder', 'user_folder', 'folder']:
-                record_type = item_type
-                logger.info(f"Found folder: {title} (type: {record_type})")
-            else:
-                # For records, parse details for more specific type (login, etc.)
-                details_str = record_data.get('details', '')
-                record_type = 'login'  # default for records
-                
-                if details_str:
-                    parts = details_str.split(', ')
-                    for part in parts:
-                        if part.startswith('Type: '):
-                            record_type = part.replace('Type: ', '').strip()
-                        elif part.startswith('Description: '):
-                            notes = part.replace('Description: ', '').strip()
-                
-                logger.info(f"Found record: {title} (type: {record_type})")
-            
+            details_str = record_data.get('details', '')
+            record_type = 'login'  # default for records
+
+            if details_str:
+                parts = details_str.split(', ')
+                for part in parts:
+                    if part.startswith('Type: '):
+                        record_type = part.replace('Type: ', '').strip()
+                    elif part.startswith('Description: '):
+                        notes = part.replace('Description: ', '').strip()
+
+            record_is_nsf = self._record_is_nsf(details_str)
+            logger.info(f"Found record: {title} (type: {record_type})")
+
             return KeeperRecord(
                 uid=uid,
                 title=title,
                 record_type=record_type,
                 folder_uid=None,
-                notes=notes
+                notes=notes,
+                is_nsf=record_is_nsf,
             )
             
         except Exception as e:
@@ -373,51 +411,38 @@ class KeeperClient:
         """
 
         try:
-            # Submit search command with UID
-            response = self.session.post(
-                f'{self.base_url}/executecommand-async',
-                json={"command": f"search {folder_uid} --format=json"},
-                timeout=10
-            )
-            
-            if response.status_code != 202:
-                logger.error(f"Failed to submit search command: {response.status_code}")
-                return None
-            
-            result_data = response.json()
-            result_id = result_data.get('request_id')
-            
-            if not result_id:
-                logger.error("No result_id in response")
-                return None
-            
-            # Poll for results
-            final_result = self._poll_for_result(result_id)
-            
-            if not final_result:
-                logger.warning(f"No folder found for UID: {folder_uid}")
+            data = self._search_items_by_uid(folder_uid)
+            if not data:
+                logger.warning(f"No search results for folder UID: {folder_uid}")
                 return None
 
-            data = final_result.get('data')
-
-            if not data or not isinstance(data, list) or len(data) == 0:
-                logger.warning(f"No folders in search results for UID: {folder_uid}")
+            folder_data = self._pick_search_result_by_uid(data, folder_uid)
+            if not folder_data:
+                logger.warning(
+                    f"No exact folder match for UID {folder_uid} "
+                    f"in {len(data)} search result(s)"
+                )
                 return None
 
-            folder_data = data[0]
-            
-            # Extract basic fields
+            folder_type = folder_data.get('type', 'folder')
+            if folder_type not in self._FOLDER_ITEM_TYPES:
+                logger.warning(
+                    f"UID {folder_uid} resolved to non-folder type "
+                    f"{folder_type!r}; expected a shared folder"
+                )
+                return None
+
             name = folder_data.get('name', 'Untitled Folder')
             uid = folder_data.get('uid', folder_uid)
-            folder_type = folder_data.get('type', 'folder')
-            
+
             logger.info(f"Found folder: {name} (type: {folder_type})")
-            
+
             return KeeperFolder(
                 uid=uid,
                 name=name,
                 parent_uid=None,
-                folder_type=folder_type
+                folder_type=folder_type,
+                is_nsf=self._folder_is_nsf(folder_type),
             )
             
         except Exception as e:
@@ -1843,6 +1868,62 @@ class KeeperClient:
                 'error': f"Error creating record: {str(e)}"
             }
     
+    def get_user_teams(self, user_email: str) -> List[str]:
+        """
+        Return the Keeper team names that ``user_email`` belongs to, using
+        ``list-team -v --format json``. Used by multi-channel approver routing
+        to pick the requester's team approval channel.
+        """
+        try:
+            response = self.session.post(
+                f'{self.base_url}/executecommand-async',
+                json={"command": "list-team -v --format json"},
+                timeout=10
+            )
+
+            if response.status_code != 202:
+                logger.error(f"Failed to submit list-team command: {response.status_code}")
+                return []
+
+            request_id = response.json().get('request_id')
+            if not request_id:
+                logger.error("No request_id received for list-team")
+                return []
+
+            result_data = self._poll_for_result(request_id, max_wait=20)
+
+            if not result_data:
+                logger.warning("list-team command timed out")
+                return []
+
+            if result_data.get('status') == 'error':
+                logger.error(f"list-team failed: {result_data.get('message', 'Unknown error')}")
+                return []
+
+            data = result_data.get('data', [])
+            if not isinstance(data, list):
+                logger.debug(f"Unexpected list-team data format: {type(data)}")
+                return []
+
+            email_lower = user_email.strip().lower()
+            teams: List[str] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                members = item.get('Member', []) or []
+                members_lower = {str(m).strip().lower() for m in members if m}
+                if email_lower in members_lower:
+                    name = item.get('Name', '')
+                    if name:
+                        teams.append(str(name).strip())
+
+            logger.debug(f"User {user_email} belongs to teams: {teams}")
+            return teams
+
+        except Exception as e:
+            logger.error(f"Exception fetching user teams: {e}", exc_info=True)
+            return []
+
     def get_user_shared_folders(self, user_email: str) -> List[Dict[str, Any]]:
         """
         Filters the report to only return folders where the user appears in the sharing list.
